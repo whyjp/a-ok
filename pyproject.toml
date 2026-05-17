@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worker-control"
+version = "0.1.0"
+description = "Local Claude Code worker-control: profiles, projects, sessions over SQLite."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "whyjp" }]
+keywords = ["claude-code", "worker", "orchestration", "tmux", "sqlite"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: Console",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+workerctl = "worker_control.cli:main"
+
+[tool.setuptools]
+packages = ["worker_control"]
+
+[tool.setuptools.package-data]
+worker_control = ["py.typed"]

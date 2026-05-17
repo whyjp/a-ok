@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.eggs/
+
+# Test/cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data — runtime DB/logs live OUTSIDE the repo at D:/work-github/.worker-control
+# These patterns are extra defense-in-depth in case someone copies data here.
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+logs/
+data/
+.worker-control/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
