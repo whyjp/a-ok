@@ -47,7 +47,39 @@ workerctl sessions list
 workerctl sessions capture <session-id-or-name>
 workerctl sessions prompt  <session-id-or-name> "ls -la"
 workerctl sessions stop    <session-id-or-name>
+
+# 7) 상태를 한 페이지로 보고 싶다면 — HTML 대시보드 생성
+workerctl view html              # D:/work-github/.worker-control/dashboard.html 작성
+workerctl view html --open       # 작성 후 기본 브라우저로 열기
+workerctl view html -o out.html  # 임의 위치
 ```
+
+## HTML 대시보드
+
+`workerctl view html` 은 현재 DB 상태를 단일 정적 HTML 로 직렬화한다.
+오프라인에서 그대로 열리며 외부 의존성이 없다.
+
+탭 구성:
+
+- **워커 프로파일** — `worker_profiles` 테이블.
+- **Hermes 스폰 세션** — `worker_sessions` 테이블 (이 도구가 띄운 워커).
+- **Native Claude 세션** — `~/.claude/projects/` 의 JSONL 을 **읽기 전용** 으로
+  디스커버리한 결과 (세션 ID, 추정된 프로젝트 경로, `permissionMode`,
+  파일 크기/줄 수/수정 시각).
+- **관리 대상 프로젝트** — `projects` 테이블. 워크스페이스 역할(badge)·정책
+  (`WRITE/PR` vs `READ-ONLY`)·git 상태·브랜치·경로를 한눈에.
+
+검색·상태/역할 필터·요약 카운터·생성 시각이 함께 표시된다. 기본 출력 위치는
+런타임 루트 아래 `dashboard.html` 이며 `.worker-control/` 자체가 이미
+`.gitignore` 로 차단되어 있다.
+
+native 디스커버리는 호스트마다 위치/포맷이 다를 수 있으므로 휴리스틱이다.
+- 기본 경로: `~/.claude/projects/`
+- 덮어쓰기: 환경변수 `WORKER_CONTROL_CLAUDE_PROJECTS_DIR`
+- 디렉토리명 디코딩은 `configured_roots()` 의 실제 자식 디렉토리와 매칭해
+  원본 하이픈(예: `worker-control`) 을 살리고, 매칭 실패 시 단순 `-→/` 치환
+  으로 폴백한다.
+- 끄려면 `--native-limit 0`.
 
 ## 데이터 경로
 
@@ -103,21 +135,29 @@ worker-control/
 ├── .gitignore
 ├── docs/
 │   ├── architecture.md
+│   ├── dashboard.md
 │   └── operations.md
 ├── worker_control/
 │   ├── __init__.py
 │   ├── __main__.py
 │   ├── cli.py
+│   ├── dashboard.py
 │   ├── db.py
+│   ├── native_sessions.py
 │   ├── paths.py
-│   ├── scanner.py
 │   ├── profiles.py
-│   ├── sessions.py
-│   └── runtime.py
+│   ├── projects.py
+│   ├── runtime.py
+│   ├── scanner.py
+│   └── sessions.py
 └── tests/
-    ├── test_paths.py
+    ├── test_dashboard.py
     ├── test_db.py
-    └── test_scanner.py
+    ├── test_native_sessions.py
+    ├── test_paths.py
+    ├── test_runtime_argv.py
+    ├── test_scanner.py
+    └── test_sessions_policy.py
 ```
 
 ## 미래 확장 (현재 미구현, 문서로만 명시)

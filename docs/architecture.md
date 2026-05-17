@@ -64,6 +64,7 @@ argparse 기반. 외부 의존성 없음. 서브커맨드 트리:
 - `profiles list | create`
 - `projects scan | list`
 - `sessions list | start | capture | prompt | stop`
+- `view html` — 현재 상태를 단일 정적 HTML 대시보드로 직렬화
 
 `projects scan` 은 `--root` 가 없으면 `configured_roots()` 의 모든 루트를
 순회한다. `--root` 가 명시되면 그 루트만 스캔한다.
@@ -110,6 +111,18 @@ argparse 기반. 외부 의존성 없음. 서브커맨드 트리:
 - **절대 `claude -p` / `--print` 사용 금지.** `claude_argv()` 가
   `FORBIDDEN_CLAUDE_ARGS` 에 걸리면 `RuntimeError` 로 정책 위반을 알린다.
 - 시작 PID/세션명을 DB 에 저장.
+
+### Dashboard / Native discovery (`worker_control.dashboard`, `worker_control.native_sessions`)
+- `dashboard.collect_snapshot()` 가 DB 의 모든 레이어(프로파일/프로젝트/
+  Hermes 세션) 를 모으고, `native_sessions.discover_native_sessions()` 가
+  `~/.claude/projects/` 의 JSONL 파일을 **read-only** 로 디스커버리한다.
+- `dashboard.render_html()` 는 그 스냅샷을 단일 HTML(인라인 CSS/JS) 로
+  직렬화한다. 외부 네트워크/폰트/스크립트 의존성 없음.
+- 디렉토리명 디코딩(`D--work-github-worker-control` →
+  `D:/work-github/worker-control`) 은 `configured_roots()` 의 실제 자식
+  디렉토리와 매칭해서 원본 하이픈을 살린다. 매칭 실패 시 단순 `-→/` 폴백.
+- CLI 진입점: `workerctl view html [--output PATH] [--open]
+  [--native-limit N]`. 기본 출력 경로는 `runtime_root()/dashboard.html`.
 
 ### Sessions (`worker_control.sessions`)
 - 세션 라이프사이클(starting → running → ... → killed) 을 코어 모듈에서

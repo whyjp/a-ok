@@ -5,7 +5,9 @@ import argparse
 import sys
 from typing import Sequence
 
-from worker_control import __version__, db, profiles, projects, scanner, sessions
+from worker_control import (
+    __version__, dashboard, db, profiles, projects, scanner, sessions,
+)
 from worker_control.paths import (
     classify_path,
     configured_roots,
@@ -138,6 +140,19 @@ def cmd_sessions_prompt(args: argparse.Namespace) -> int:
     return 0 if note == "ok" else 1
 
 
+def cmd_view_html(args: argparse.Namespace) -> int:
+    """HTML 대시보드를 생성한다. ``--open`` 으로 브라우저까지 열 수 있다."""
+    output_path = dashboard.write_dashboard(
+        output=args.output,
+        native_limit=args.native_limit,
+    )
+    print(f"dashboard written: {output_path}")
+    if args.open:
+        opened = dashboard.open_in_browser(output_path)
+        print("opened in browser" if opened else "(browser open failed)")
+    return 0
+
+
 def cmd_sessions_stop(args: argparse.Namespace) -> int:
     try:
         s = sessions.stop_session(args.session)
@@ -213,6 +228,34 @@ def _build_parser() -> argparse.ArgumentParser:
     sx = ss_sub.add_parser("stop", help="stop a session")
     sx.add_argument("session", help="session id or name")
     sx.set_defaults(func=cmd_sessions_stop)
+
+    # view (HTML dashboard)
+    vv = sub.add_parser(
+        "view",
+        help="render the worker-control state as a static dashboard",
+    )
+    vv_sub = vv.add_subparsers(dest="action", required=True)
+    vh = vv_sub.add_parser(
+        "html",
+        help="write a single-file HTML dashboard "
+             "(workers / hermes sessions / native sessions / projects)",
+    )
+    vh.add_argument(
+        "--output", "-o", default=None,
+        help="output HTML path "
+             "(default: <runtime_root>/dashboard.html, "
+             "i.e. D:/work-github/.worker-control/dashboard.html)",
+    )
+    vh.add_argument(
+        "--open", action="store_true",
+        help="also open the generated file in the default browser",
+    )
+    vh.add_argument(
+        "--native-limit", type=int, default=500,
+        help="maximum number of native Claude sessions to discover "
+             "(default: 500; use 0 to skip native discovery)",
+    )
+    vh.set_defaults(func=cmd_view_html)
 
     return p
 

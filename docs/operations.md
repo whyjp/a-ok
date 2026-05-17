@@ -140,6 +140,19 @@ workerctl sessions stop <session-id-or-name>
 - **콘솔 모드**: 저장된 PID 로 `taskkill /PID <pid> /T /F` (Windows) 또는
   `kill -TERM <pid>` (POSIX).
 
+## HTML 대시보드
+
+전체 상태를 한 페이지로 보고 싶다면:
+
+```bash
+workerctl view html               # D:/work-github/.worker-control/dashboard.html 작성
+workerctl view html --open        # 작성 후 브라우저로 열기
+workerctl view html -o /tmp/x.html --native-limit 1000
+```
+
+탭은 워커 프로파일 / Hermes 스폰 세션 / Native Claude 세션 / 관리 대상
+프로젝트 네 개로 구성된다. 자세한 내용은 `docs/dashboard.md` 참고.
+
 ## 상태 어휘
 
 ```
