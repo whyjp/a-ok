@@ -29,4 +29,4 @@ workerctl = "worker_control.cli:main"
 packages = ["worker_control"]
 
 [tool.setuptools.package-data]
-worker_control = ["py.typed"]
+worker_control = ["py.typed", "static/*.html"]
