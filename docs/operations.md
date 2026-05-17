@@ -140,18 +140,116 @@ workerctl sessions stop <session-id-or-name>
 - **콘솔 모드**: 저장된 PID 로 `taskkill /PID <pid> /T /F` (Windows) 또는
   `kill -TERM <pid>` (POSIX).
 
-## HTML 대시보드
+## 대시보드 (SQLite BFF + 동적 FE)
 
-전체 상태를 한 페이지로 보고 싶다면:
+전체 상태를 한 페이지로 보고 싶다면 — **기본 운영은 SQLite 기반 BFF + 동적 FE**
+(`workerctl view serve`) 다. 정적 단일 파일 export 는 BFF 없이 첨부/공유가
+필요할 때만 쓰는 **레거시** 경로이며 `--legacy` 플래그를 명시해야 한다.
+
+**SQLite DB 경로 우선순위**: `--db` > `WORKER_CONTROL_DB` >
+`${WORKER_CONTROL_HOME}/worker-control.sqlite3` >
+`D:/work-github/.worker-control/worker-control.sqlite3`.
 
 ```bash
-workerctl view html               # D:/work-github/.worker-control/dashboard.html 작성
-workerctl view html --open        # 작성 후 브라우저로 열기
-workerctl view html -o /tmp/x.html --native-limit 1000
+# 기본: SQLite 기반 BFF + 동적 FE (요청마다 DB 재조회, 5 초 polling)
+workerctl view serve              # http://127.0.0.1:8765/
+workerctl dashboard               # 동일 명령의 짧은 별칭
+workerctl view serve --open       # 띄운 뒤 브라우저로 열기
+workerctl view serve --port 9000  # 다른 포트
+workerctl view serve --db D:/work-github/.worker-control/worker-control.sqlite3
+workerctl view serve --runtime-root D:/work-github/.worker-control
+
+# [LEGACY] 단일 파일 스냅샷 — 오프라인 첨부/공유용
+workerctl view html --legacy                  # <runtime_root>/dashboard.html 작성
+workerctl view html --legacy --open
+workerctl view html --legacy -o /tmp/x.html --native-limit 1000
 ```
 
 탭은 워커 프로파일 / Hermes 스폰 세션 / Native Claude 세션 / 관리 대상
 프로젝트 네 개로 구성된다. 자세한 내용은 `docs/dashboard.md` 참고.
+
+`workerctl view serve` 는 stdlib `http.server` 만 사용하며 (외부 의존성 0),
+기본적으로 loopback(`127.0.0.1`) 에만 바인딩한다. 비-loopback 주소로 열려면
+`--allow-remote` 가 필요하다. 응답하는 엔드포인트는 `/`, `/api/snapshot`,
+`/api/health` 세 개이고 모두 read-only 다.
+
+## Hermes 시작 시 자동 기동 (상시 대시보드)
+
+Hermes 가 떠 있는 동안 `http://127.0.0.1:8765/` 에 동적 대시보드가 항상
+응답하도록 supervisor 를 띄운다.
+
+```bash
+# 기본 supervisor — 코드 변경 시 자식 BFF 자동 재시작
+workerctl dashboard-daemon --log D:/work-github/.worker-control/dashboard.log
+
+# 또는 한 번만 띄우고 빠지기 (Hermes 가 자체적으로 detach 한다면 충분)
+workerctl dashboard-daemon --once --log D:/work-github/.worker-control/dashboard.log
+
+# 얇은 wrapper (Hermes config 에 절대경로로 박기 좋음)
+python D:/work-github/worker-control/scripts/worker_control_dashboard_service.py
+```
+
+핵심:
+
+- **중복 실행 금지** — 시작 시 `/api/health` 를 먼저 찔러 이미 떠 있으면
+  새 자식을 띄우지 않는다.
+- **포트 8765 기본**, DB `D:/work-github/.worker-control/worker-control.sqlite3`.
+- **자동 재시작** — `worker_control/*.py` 와 `worker_control/static/*.html`
+  의 mtime 을 1 초 주기로 polling 해서 변경 감지 시 자식 BFF 를 graceful
+  terminate → respawn 한다 (기본 `--watch` 켜짐, `--no-watch` 로 끔).
+- **자식 사망 시 자동 재기동** — 자식 BFF 가 죽으면 supervisor 가 다시
+  띄운다.
+
+환경변수로도 같은 동작:
+
+| 변수 | 의미 | 기본값 |
+|------|------|--------|
+| `WORKER_CONTROL_DASHBOARD_HOST` | bind host | `127.0.0.1` |
+| `WORKER_CONTROL_DASHBOARD_PORT` | bind port | `8765` |
+| `WORKER_CONTROL_DASHBOARD_LOG`  | 자식 BFF stdout/stderr 로그 | (DEVNULL) |
+| `WORKER_CONTROL_DASHBOARD_ONCE` | `1` 이면 ensure-running 만 하고 종료 | `0` |
+
+데이터는 SQLite 에 실시간으로 적재되며, FE 는 `/api/snapshot` 을 5 초마다
+polling 하므로 페이지 새로고침 없이도 갱신된다 (자세한 흐름은
+`docs/dashboard.md`).
+
+## Telegram snapshot cron (30 분 주기)
+
+레거시 정적 dashboard 는 **Telegram 으로 보내는 snapshot 전용** 으로만 쓴다.
+
+```bash
+# 살아있는 세션이 있을 때만 stdout 에 메시지 + MEDIA:<path> 출력
+workerctl dashboard-snapshot
+
+# Hermes cron 용 wrapper (절대경로)
+python D:/work-github/worker-control/scripts/send_dashboard_snapshot.py
+```
+
+동작:
+
+- **살아있는 세션 정의** — `worker_sessions.state` ∈
+  `{starting, running, working, waiting_input, blocked}` 중 하나라도 있거나,
+  최근 24 시간 내 mtime 을 가진 native Claude 세션이 있으면 alive.
+- alive 면 `<runtime_root>/telegram-snapshot.html` 에 legacy 단일 파일
+  HTML 을 생성하고 stdout 에:
+  ```
+  📊 worker-control snapshot
+  · generated: ...
+  ...
+  MEDIA:D:/work-github/.worker-control/telegram-snapshot.html
+  ```
+- alive 가 아니면 stdout 은 비어있다 (Hermes cron 이 조용히 넘어가도록).
+
+Hermes `no_agent` cron 예시 (config 위치/포맷은 Hermes 측 문서를 따른다):
+
+```ini
+# 30 min 주기
+[cron.worker_control_snapshot]
+schedule = "*/30 * * * *"
+mode = "no_agent"
+command = "python D:/work-github/worker-control/scripts/send_dashboard_snapshot.py"
+# stdout 의 MEDIA:<path> 와 텍스트 본문이 Telegram 으로 그대로 전달된다
+```
 
 ## 상태 어휘
 

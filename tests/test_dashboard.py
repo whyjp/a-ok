@@ -133,13 +133,23 @@ def test_render_json_payload_escapes_script_tag(tmp_path: Path, monkeypatch):
 
 def test_cli_view_html_creates_file(populated_db, tmp_path: Path):
     target = tmp_path / "out" / "dash.html"
-    rc = cli.main(["view", "html", "--output", str(target)])
+    rc = cli.main(["view", "html", "--legacy", "--output", str(target)])
     assert rc == 0
     assert target.exists()
 
 
+def test_cli_view_html_requires_legacy_flag(populated_db, tmp_path: Path, capsys):
+    target = tmp_path / "out" / "dash.html"
+    rc = cli.main(["view", "html", "--output", str(target)])
+    assert rc == 2
+    assert not target.exists()
+    err = capsys.readouterr().err
+    assert "--legacy" in err
+    assert "view serve" in err
+
+
 def test_cli_view_html_default_under_runtime_root(populated_db, tmp_path: Path):
-    rc = cli.main(["view", "html"])
+    rc = cli.main(["view", "html", "--legacy"])
     assert rc == 0
     # runtime_root 가 conftest 에서 tmp_path/.worker-control 로 잡혀 있음
     expected = tmp_path / ".worker-control" / "dashboard.html"
@@ -150,8 +160,33 @@ def test_cli_view_html_native_limit_zero_disables(
     populated_db, tmp_path: Path,
 ):
     target = tmp_path / "no-native.html"
-    rc = cli.main(["view", "html", "--output", str(target),
+    rc = cli.main(["view", "html", "--legacy", "--output", str(target),
                    "--native-limit", "0"])
     assert rc == 0
     body = target.read_text(encoding="utf-8")
     assert "비활성화" in body
+
+
+# --- FE 자산 / BFF 통합 -------------------------------------------------------
+
+def test_static_dashboard_html_is_packaged_and_parseable():
+    """정적 FE 자산이 패키지에 함께 깔리고, placeholder 가 그대로 들어있다."""
+    text = dashboard.static_dashboard_html()
+    assert text.startswith("<!DOCTYPE html>")
+    # placeholder 가 정적 자산에 있어야 한다 (render_html 이 이 자리를 치환)
+    assert '"__INLINE_DATA__"' in text
+    # FE 가 BFF 와 통신하는 엔드포인트
+    assert "api/snapshot" in text
+    # 라벨이 살아 있는지
+    assert "워커 프로파일" in text
+    assert "Hermes 스폰 세션" in text
+
+
+def test_render_html_replaces_inline_placeholder(populated_db):
+    """render_html 은 placeholder 위치에 스냅샷 JSON 을 박는다 (레거시 경로)."""
+    snap = dashboard.collect_snapshot()
+    html_text = dashboard.render_html(snap)
+    # placeholder 가 더 이상 보이면 안 됨 (인라인 데이터로 치환됨)
+    assert '"__INLINE_DATA__"' not in html_text
+    # 같은 자산 기반이므로 동일한 한국어 라벨이 그대로 살아 있어야 한다
+    assert "워커 프로파일" in html_text

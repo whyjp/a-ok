@@ -1,39 +1,91 @@
-# Dashboard (HTML view layer)
+# Dashboard (SQLite-backed BFF + 동적 FE)
 
-`workerctl view html` 은 worker-control 의 현재 상태를 **단일 정적 HTML** 로
-직렬화한다. 외부 라이브러리/네트워크 요청 없이 동작하며 그대로 오프라인
-브라우저에서 열린다.
+worker-control 의 대시보드는 **SQLite 를 읽는 backend-for-frontend (BFF) +
+동적 FE** 구조다. FE 는 패키지에 묶여 있는 정적 자산
+(`worker_control/static/dashboard.html`) 한 장이고, BFF (`worker_control.server`)
+가 그 FE 를 서빙하면서 `/api/snapshot` JSON 으로 데이터를 공급한다.
 
-## 생성 / 열기
-
-```bash
-workerctl view html                     # 기본 위치에 작성
-workerctl view html --open              # 작성 후 기본 브라우저로 열기
-workerctl view html -o /tmp/dash.html   # 임의 경로
-workerctl view html --native-limit 0    # native 디스커버리 끄기
-workerctl view html --native-limit 2000 # 더 많이 보기 (기본 500)
+```
++--------------------------+                +---------------------------+
+|  worker_control/static/  |   GET /        |  worker_control.server    |
+|  dashboard.html (정적 FE) | <------------- |  (ThreadingHTTPServer)    |
++--------------------------+                +---------------------------+
+                                                       |
+                       GET /api/snapshot               v
+                       (JSON)                  +-------------------+
+                       <----------------------+  worker-control DB |
+                                              |  worker-control.   |
+                                              |  sqlite3           |
+                                              +-------------------+
 ```
 
-기본 출력 경로: `<runtime_root>/dashboard.html`
-(= 기본값 `D:/work-github/.worker-control/dashboard.html`).
-`.worker-control/` 디렉토리는 이미 `.gitignore` 로 차단되어 있으므로
-런타임 산출물이 저장소에 섞일 위험이 없다.
+매번 정적 HTML 을 새로 만들지 않는다. 같은 FE 자산을 계속 서빙하고, DB 가
+바뀌면 다음 polling 에서 자동 반영된다.
 
-CLI 종료 코드는 일반 CLI 와 동일하다 (정책 위반은 없으므로 dashboard 명령은
-사실상 항상 0).
+## 빠른 시작
 
-## 페이지 구성
+```bash
+# 1) DB 초기화 (한 번)
+workerctl init
+
+# 2) BFF 띄우기 — 둘 다 같은 명령
+workerctl view serve
+workerctl dashboard            # 짧은 별칭
+
+# 옵션
+workerctl view serve --open                              # 브라우저까지 자동
+workerctl view serve --port 9000
+workerctl view serve --db D:/work-github/.worker-control/worker-control.sqlite3
+workerctl view serve --runtime-root D:/work-github/.worker-control
+workerctl view serve --host 0.0.0.0 --allow-remote      # 비-loopback 노출
+```
+
+기본 바인딩은 `http://127.0.0.1:8765/` (loopback 전용). 비-loopback 주소를
+쓰려면 `--allow-remote` 가 함께 필요하다. 대시보드는 DB 경로/프로젝트 경로
+같은 환경 정보를 노출하므로 신뢰된 네트워크에서만 띄워야 한다.
+
+## SQLite DB 경로
+
+BFF 가 어떤 DB 를 읽는지 결정하는 우선순위:
+
+1. `workerctl view serve --db <path>` (인자) — 최우선.
+2. 환경변수 `WORKER_CONTROL_DB`.
+3. `WORKER_CONTROL_HOME/worker-control.sqlite3` (런타임 루트 아래).
+4. 기본값 `D:/work-github/.worker-control/worker-control.sqlite3`.
+
+`--db` 와 `--runtime-root` 는 BFF 가 떠 있는 동안의 프로세스 환경변수를
+세팅해서 동작한다 — 같은 프로세스 안의 모든 모듈이 즉시 그 값을 본다.
+
+## 엔드포인트
+
+| 메서드 / 경로 | 응답 |
+|---------------|------|
+| `GET /`               | 정적 FE HTML (= `dashboard.html` 자산) |
+| `GET /dashboard.html` | `/` 의 alias |
+| `GET /api/snapshot`   | `DashboardSnapshot` 의 JSON 직렬화 (요청마다 SQLite 재조회) |
+| `GET /api/health`     | `{ ok, service, version, db_path, db_exists, runtime_root }` |
+
+JSON 페이로드는 다음 키를 포함한다:
+
+- `generated_at`, `version`, `db_path`, `runtime_root`
+- `workspace_roots[]` — owned_work / public_reference 라벨과 정책
+- `profiles[]` — `worker_profiles` 행
+- `projects[]` — `projects` 행 + `policy` (work_capable / read_only)
+- `hermes_sessions[]` — `worker_sessions` 행 + profile/project 조인
+- `native_sessions[]` — `~/.claude/projects/` 디스커버리 결과
+- `native_root`, `native_root_exists`, `native_note`
+- `counters` — 9 종 요약치
+
+## FE 페이지 구성
 
 ```
 +-----------------------------------------------------------------+
 |  worker-control · 컨트롤 패널                                    |
-|  버전 · DB · 런타임 · 생성 시각                                  |
+|  버전 · DB · 런타임 · 생성 시각 · 모드(라이브/오프라인)          |
 +-----------------------------------------------------------------+
 |  워크스페이스 카드 (owned_work / public_reference)               |
-|   - 경로 · WRITE/READ-ONLY 정책 · exists 여부                    |
 +-----------------------------------------------------------------+
-|  요약 카운터 9장 — 프로파일/프로젝트/owned/public/git/dirty/      |
-|  Hermes 세션/running/native 세션                                  |
+|  요약 카운터 9장                                                 |
 +-----------------------------------------------------------------+
 |  [워커] [Hermes] [Native] [프로젝트]   ← 탭                       |
 +-----------------------------------------------------------------+
@@ -41,114 +93,119 @@ CLI 종료 코드는 일반 CLI 와 동일하다 (정책 위반은 없으므로 
 +-----------------------------------------------------------------+
 ```
 
-### 탭 1 — 워커 프로파일
+### 탭
 
-`worker_profiles` 테이블의 행을 그대로 표시. 이름/루트로 검색.
+| 탭 | 출처 |
+|----|------|
+| 워커 프로파일 | `worker_profiles` 테이블 |
+| Hermes 스폰 세션 | `worker_sessions` 테이블 (이 도구가 띄운 워커) |
+| Native Claude 세션 | `~/.claude/projects/<encoded-path>/<uuid>.jsonl` (read-only) |
+| 관리 대상 프로젝트 | `projects` 테이블 + 워크스페이스 정책 라벨 |
 
-### 탭 2 — Hermes 스폰 세션
+상태/역할 색상은 기존과 동일 (`running`/`working` → accent, `failed`/`killed`
+→ danger 등).
 
-`worker_sessions` 테이블 = **이 도구가 띄운** Claude 워커 세션. Hermes 등
-외부 오케스트레이터가 `workerctl sessions start` 로 만든 모든 세션은 여기에
-잡힌다. 상태(state) 드롭다운 + 텍스트 검색.
+### Native 디스커버리
 
-상태 색상:
-- `running` / `working` → 강조 (accent)
-- `starting` → info
-- `waiting_input` / `blocked` → warn
-- `failed` / `killed` → danger
-- `completed` → muted
+- 기본 경로: `~/.claude/projects/`
+- 덮어쓰기: 환경변수 `WORKER_CONTROL_CLAUDE_PROJECTS_DIR`
+- 디렉토리명 디코딩(`D--work-github-worker-control` →
+  `D:/work-github/worker-control`)은 `configured_roots()` 의 실제 자식
+  디렉토리와 매칭해 원본 하이픈을 살린다. 매칭 실패 시 단순 `-→/` 폴백.
+- 끄려면 `--native-limit 0`.
 
-### 탭 3 — Native Claude 세션 (read-only 디스커버리)
+## FE 의 부팅 흐름
 
-`~/.claude/projects/<encoded-path>/<uuid>.jsonl` 파일들을 **읽기 전용** 으로
-스캔. 디렉토리/파일에 손대지 않는다.
+`worker_control/static/dashboard.html` 의 JS 는 세 가지 시나리오를 자동
+구분한다:
 
-수집 항목:
-- `session_id` (파일명에서 추출한 UUID)
-- 디코딩된 프로젝트 경로 추정 + 원본 인코딩 디렉토리명
-- `permissionMode` (JSONL 의 첫 ~50줄에서 발견되는 값)
-- `leafUuid`
-- 파일 크기 / 줄 수 / 마지막 수정 UTC 시각
-
-#### 디렉토리명 디코딩 휴리스틱
-
-Claude Code 의 인코딩은 공식 스펙이 없고 `:` / `/` / `\` 모두 `-` 로 치환되는
-**lossy** 인코딩이라 단순 `-→/` 치환은 원본 경로의 하이픈
-(예: `worker-control`) 을 망가뜨린다. 그래서 다음 순서로 시도한다:
-
-1. `configured_roots()` 의 각 루트에 대해 **실제로 1단계 자식 디렉토리** 를
-   열어 보고, `encode(root)/(child)` 가 `name` prefix 와 일치하면 원본 그대로
-   복원 — 하이픈 보존됨.
-2. 루트만 prefix 매칭되면 그 뒤를 `-→/` 로 변환 (deep paths 에서 부정확할
-   수 있음 — "추정" 표기).
-3. 알려진 루트 외부면 드라이브 prefix(`D--…`) 만 살리고 나머지를 `-→/` 치환.
-4. 그것도 아니면 단순 `-→/` 치환.
-
-#### 한계
-
-- 파일 위치/포맷은 Claude Code 버전에 따라 변할 수 있다. 호환성을 위해 모든
-  접근은 `try/except` 로 감싸고, 실패해도 대시보드는 정상 렌더된다.
-- 본 도구는 이 JSONL 들을 **읽기만** 한다. 삭제/수정/병합/링크 생성 없음.
-- 디렉토리 자체가 없으면 안내 메시지를 띄우고 빈 테이블을 보여준다.
-- 환경변수 `WORKER_CONTROL_CLAUDE_PROJECTS_DIR` 로 위치를 명시 지정할 수 있다.
-
-### 탭 4 — 관리 대상 프로젝트
-
-`projects` 테이블 + 워크스페이스 정책 라벨. 다음 필터 제공:
-
-- 워크스페이스 (owned_work / public_reference / other)
-- git 상태 (전체 / git 만 / dirty 만 / clean git 만)
-- 텍스트 (이름/브랜치/경로/원격)
-
-각 행에는 정책 pill 이 함께 표시된다:
-
-- **owned_work** → `WRITE/PR` (`workerctl sessions start` 가능)
-- **public_reference** → `READ-ONLY` (`workerctl sessions start` 가 정책으로 거부됨)
-- **other** → 표시만, 세션 시작 시 거부
-
-## 데이터 흐름
-
-```
-            +------------------------+
-            |  worker_control.db     |
-            |  worker_profiles       |
-            |  worker_sessions       |
-            |  projects              |
-            +------------------------+
-                       |
-                       v
-            +------------------------+        +---------------------------+
-            |  dashboard.collect_    |  +-----+  native_sessions          |
-            |  snapshot()            |        |  .discover_native_        |
-            |  (DashboardSnapshot)   |        |  sessions()               |
-            +------------------------+        |  (~/.claude/projects/)    |
-                       |                      +---------------------------+
-                       v
-            +------------------------+
-            |  dashboard.render_html |
-            |  (단일 HTML 문자열)    |
-            +------------------------+
-                       |
-                       v
-            +------------------------+
-            |  dashboard.html        |
-            |  (정적, 오프라인)      |
-            +------------------------+
-```
+1. **`http(s)://` 으로 열림 (BFF 모드)**
+   - 페이지 부팅 직후 `fetch('/api/snapshot')` 으로 데이터 1회 로드.
+   - 이후 5 초 주기로 polling 해서 자동 재렌더.
+   - 상단 메타에 `모드 라이브 · 5s` 표시.
+2. **`file://` 으로 열림 + 인라인 데이터 있음 (legacy export 모드)**
+   - `<script id="dashboard-data">` 의 placeholder `"__INLINE_DATA__"` 가
+     실제 JSON 으로 치환되어 있으면 그 값으로 한 번만 렌더.
+   - polling 없음. 상단 메타에 `모드 오프라인 스냅샷` 표시.
+3. **`file://` 으로 열림 + 인라인 데이터 없음**
+   - "BFF 가 필요합니다" 배너만 보여주고 멈춘다. `workerctl view serve` 를
+     쓰라고 안내한다.
 
 ## 보안 / 안전
 
-- HTML 페이로드는 인라인 JSON 으로 박힌다. `</script>` / `<!--` 가 데이터에
-  들어가도 안전하게 escape 된다 (테스트로 회귀 방어).
-- 모든 사용자 데이터(프로파일명, 프로젝트 경로 등) 는 클라이언트측
+- 모든 사용자 데이터(프로파일명, 프로젝트 경로 등)는 클라이언트측
   `escapeHtml()` 을 거쳐 DOM 에 들어간다.
-- 외부 네트워크 호출 없음. 폰트도 시스템 기본 + 모노스페이스 폴백만.
-- native 디스커버리는 read-only — 파일 수정/생성/삭제하지 않는다.
+- legacy export 의 인라인 JSON 은 `</script>` / `<!--` 를 escape 한다
+  (XSS 방지, 회귀 테스트 있음).
+- 외부 네트워크/폰트 호출 없음. 시스템 폰트만.
+- BFF 는 read-only — 어떤 엔드포인트도 DB 를 변경하지 않는다.
+- native 디스커버리는 read-only — 파일을 수정/생성/삭제하지 않는다.
+- 기본 바인딩은 `127.0.0.1`. 비-loopback 은 명시적 `--allow-remote` 필요.
+
+## 상시 실행 / 자동 재시작 (`dashboard-daemon`)
+
+Hermes 가 떠 있는 동안 대시보드가 항상 응답하도록 supervisor 를 띄울 수
+있다. supervisor 는
+
+1. 시작 시 `/api/health` 를 찔러 이미 떠 있으면 새 자식을 띄우지 않고,
+2. 없으면 자식 BFF 를 detached subprocess 로 spawn 하고,
+3. `worker_control/*.py` 와 `static/*.html` 의 mtime 을 1 초 주기로
+   감시해서 코드가 바뀌면 자식을 안전하게 재시작하며,
+4. 자식이 죽으면 자동으로 다시 띄운다.
+
+```bash
+workerctl dashboard-daemon --log D:/work-github/.worker-control/dashboard.log
+workerctl dashboard-daemon --once   # ensure-running 한 번 만 하고 종료
+workerctl dashboard-daemon --no-watch  # supervisor 없이 그대로 detach
+```
+
+stdlib 만 사용하므로 Windows/Git-Bash 양쪽에서 동일하게 동작한다. 자세한
+Hermes 통합 예시는 `docs/operations.md` 참고.
+
+## Telegram snapshot (`dashboard-snapshot`)
+
+레거시 단일 파일 HTML 은 더 이상 일상 운영에서 쓰지 않는다. Hermes cron
+에서 30 분 주기로 Telegram 으로 보내는 snapshot 용으로만 남겼다.
+
+```bash
+workerctl dashboard-snapshot
+# 살아있는 세션이 있을 때만 stdout 에:
+#   📊 worker-control snapshot
+#   · generated: ...
+#   ...
+#   MEDIA:D:/work-github/.worker-control/telegram-snapshot.html
+```
+
+살아있다 = `worker_sessions.state ∈ {starting, running, working,
+waiting_input, blocked}` 또는 최근 24 시간 내 mtime 의 native 세션이
+존재할 때. 살아있지 않으면 stdout 을 비워서 cron 이 조용히 지나간다.
+
+## 레거시: 단일 파일 HTML export
+
+오프라인 첨부/공유 등 BFF 없이 단독 HTML 이 필요한 경우에만 사용한다.
+일반 운영에서는 쓰지 말 것.
+
+```bash
+workerctl view html --legacy                       # default <runtime_root>/dashboard.html
+workerctl view html --legacy --open
+workerctl view html --legacy -o /tmp/dash.html --native-limit 1000
+workerctl view html --legacy --native-limit 0      # native 디스커버리 끄기
+```
+
+- `--legacy` 플래그를 명시하지 않으면 거부되며 BFF 사용을 안내한다.
+- 출력 HTML 은 `worker_control/static/dashboard.html` 자산을 그대로 쓰되,
+  placeholder `"__INLINE_DATA__"` 위치에 현재 스냅샷 JSON 을 박는다.
+- 한 번 생성된 파일은 그 시점의 스냅샷이다 — DB 가 바뀌면 다시 생성해야 한다.
 
 ## 환경 변수
 
-`workerctl` 의 다른 변수와 동일하며 추가로:
+`workerctl` 의 다른 변수와 동일하며 BFF 관련해서:
 
 | 변수 | 의미 | 기본값 |
 |------|------|--------|
+| `WORKER_CONTROL_DB` | BFF/CLI 가 읽는 SQLite 경로 | `${WORKER_CONTROL_HOME}/worker-control.sqlite3` |
+| `WORKER_CONTROL_HOME` | 런타임 루트 (= 기본 DB 부모) | `D:/work-github/.worker-control` |
 | `WORKER_CONTROL_CLAUDE_PROJECTS_DIR` | native 세션 JSONL 루트 | `~/.claude/projects` |
+
+`workerctl view serve --db` / `--runtime-root` 는 위 환경변수를 그대로
+세팅하는 단축 옵션이다.

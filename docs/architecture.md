@@ -64,7 +64,8 @@ argparse 기반. 외부 의존성 없음. 서브커맨드 트리:
 - `profiles list | create`
 - `projects scan | list`
 - `sessions list | start | capture | prompt | stop`
-- `view html` — 현재 상태를 단일 정적 HTML 대시보드로 직렬화
+- `view serve` (alias `dashboard`) — SQLite 기반 BFF + 정적 FE 서빙
+- `view html --legacy` — [LEGACY] BFF 없이 단일 HTML 스냅샷 export
 
 `projects scan` 은 `--root` 가 없으면 `configured_roots()` 의 모든 루트를
 순회한다. `--root` 가 명시되면 그 루트만 스캔한다.
@@ -112,17 +113,47 @@ argparse 기반. 외부 의존성 없음. 서브커맨드 트리:
   `FORBIDDEN_CLAUDE_ARGS` 에 걸리면 `RuntimeError` 로 정책 위반을 알린다.
 - 시작 PID/세션명을 DB 에 저장.
 
-### Dashboard / Native discovery (`worker_control.dashboard`, `worker_control.native_sessions`)
+### Dashboard data layer / Native discovery (`worker_control.dashboard`, `worker_control.native_sessions`)
 - `dashboard.collect_snapshot()` 가 DB 의 모든 레이어(프로파일/프로젝트/
   Hermes 세션) 를 모으고, `native_sessions.discover_native_sessions()` 가
   `~/.claude/projects/` 의 JSONL 파일을 **read-only** 로 디스커버리한다.
-- `dashboard.render_html()` 는 그 스냅샷을 단일 HTML(인라인 CSS/JS) 로
-  직렬화한다. 외부 네트워크/폰트/스크립트 의존성 없음.
+- `dashboard.snapshot_to_payload()` 는 스냅샷을 JSON 직렬화 가능한 dict 로
+  바꾼다. BFF 의 `/api/snapshot` 응답과 레거시 인라인 export 가 같은 함수를
+  쓴다.
+- `dashboard.static_dashboard_html()` 는 패키지에 묶여 있는 정적 FE
+  자산(`worker_control/static/dashboard.html`) 을 그대로 반환한다. BFF 가
+  `GET /` 응답으로 이 파일을 보낸다.
+- `dashboard.render_html()` (**LEGACY**) 는 정적 자산의 placeholder
+  `"__INLINE_DATA__"` 위치에 스냅샷 JSON 을 박아 단일 HTML 을 반환한다 —
+  오프라인 첨부용으로만 사용한다.
 - 디렉토리명 디코딩(`D--work-github-worker-control` →
   `D:/work-github/worker-control`) 은 `configured_roots()` 의 실제 자식
   디렉토리와 매칭해서 원본 하이픈을 살린다. 매칭 실패 시 단순 `-→/` 폴백.
-- CLI 진입점: `workerctl view html [--output PATH] [--open]
-  [--native-limit N]`. 기본 출력 경로는 `runtime_root()/dashboard.html`.
+
+### FE 자산 (`worker_control/static/dashboard.html`)
+- CSS/JS 가 모두 인라인된 단일 HTML. 외부 네트워크/폰트/스크립트 의존성 없음.
+- 부팅 시 `<script id="dashboard-data">` 의 내용을 파싱한다:
+  - 객체면 = 레거시 인라인 export → 그 값으로 한 번 그린다 (polling 없음).
+  - placeholder 그대로면 = BFF 모드 → `fetch('/api/snapshot')` 으로 데이터를
+    가져오고 5 초 주기로 polling 한다.
+  - `file://` + 인라인 없음이면 안내 배너만 보여주고 멈춘다.
+
+### BFF (`worker_control.server`)
+- stdlib `http.server.ThreadingHTTPServer` 기반 백엔드. 외부 의존성 0.
+- `GET /` — 정적 FE 자산을 그대로 응답 (요청마다 디스크에서 다시 읽음).
+- `GET /api/snapshot` — 요청마다 `collect_snapshot()` 을 재호출해 JSON 응답.
+  즉 `projects scan` / `sessions start` 결과가 다음 polling 에서 자동 반영.
+- `GET /api/health` — 서비스/DB 상태 (`{ok, version, db_path, db_exists,
+  runtime_root}`).
+- `DashboardServer(db_path_override=..., runtime_root_override=...)` —
+  생성 시점에 `WORKER_CONTROL_DB` / `WORKER_CONTROL_HOME` 환경변수를
+  덮어쓴다. CLI 의 `--db` / `--runtime-root` 가 이 경로로 들어온다.
+- 기본 바인딩은 `127.0.0.1:8765`. `--allow-remote` 없이 다른 호스트로 띄우면
+  CLI 가 종료 코드 2 로 거부한다.
+- 어떤 엔드포인트도 DB 를 변경하지 않는다 (read-only 백엔드).
+- CLI 진입점: `workerctl view serve` (alias `workerctl dashboard`)
+  `[--host H] [--port P] [--open] [--allow-remote] [--native-limit N]
+  [--db PATH] [--runtime-root PATH]`.
 
 ### Sessions (`worker_control.sessions`)
 - 세션 라이프사이클(starting → running → ... → killed) 을 코어 모듈에서
