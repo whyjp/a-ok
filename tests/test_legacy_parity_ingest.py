@@ -86,6 +86,43 @@ def test_ingest_all_populates_canonical_db(tmp_path: Path, monkeypatch) -> None:
     assert stats2["skipped"] >= 1
 
 
+def test_ingest_all_auto_runs_split_migration(tmp_path: Path, monkeypatch) -> None:
+    """A heartbeat tick on a legacy DB (claude rows in hermes_agent_sessions)
+    moves them into claude_session_parity without an explicit migrate call.
+
+    Regression guard for the auto-apply hook added to ``ingest_all``.
+    """
+    db = tmp_path / "wc.sqlite3"
+    conn = sqlite3.connect(db)
+    apply_legacy_parity_schema(conn)
+
+    # Seed a legacy-shaped row that lived in hermes_agent_sessions before the
+    # split: transcript_path under ~/.claude/projects/...
+    uid = "11111111-2222-3333-4444-555555555555"
+    conn.execute(
+        "INSERT INTO hermes_agent_sessions"
+        "(hermes_session_id, transcript_path, transcript_mtime, synced_at, kind) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (uid, "C:/Users/x/.claude/projects/Foo/" + uid + ".jsonl",
+         "2026-05-18T00:00:00+00:00", "2026-05-18T00:00:00+00:00", "native"),
+    )
+    conn.commit()
+
+    # Point ingest at empty source dirs so it doesn't try to scan real disk.
+    monkeypatch.setattr(ingest_mod, "CLAUDE_PROJECTS_DIR", tmp_path / "no_claude")
+    monkeypatch.setattr(ingest_mod, "HERMES_HOME_DIR",   tmp_path / "no_hermes")
+
+    ingest_all(conn)
+
+    # The legacy row must now live in claude_session_parity, not hermes_agent_sessions.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM hermes_agent_sessions WHERE hermes_session_id=?", (uid,)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM claude_session_parity WHERE session_uuid=?", (uid,)
+    ).fetchone()[0] == 1
+
+
 def test_load_session_payload_matches_legacy_keys(tmp_path: Path, monkeypatch) -> None:
     db = tmp_path / "wc.sqlite3"
     conn = sqlite3.connect(db)

@@ -144,8 +144,29 @@ def ingest_all(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, in
 
     Returns counters: {"claude_scanned", "claude_updated",
     "hermes_scanned", "hermes_updated", "skipped"}.
+
+    Also opportunistically applies the split-claude-parity data migration —
+    new hosts get the row-shuffle automatically on the first heartbeat tick
+    instead of requiring an out-of-band ``workerctl-hermes-migrate`` run.
+    The migration is idempotent + cheap when there's nothing to move
+    (only reads ``hermes_agent_sessions.transcript_path``), so calling it
+    every tick is safe.
     """
     apply_legacy_parity_schema(conn)
+    # Auto-apply pending data migrations. Today there's exactly one
+    # (split-claude-parity); register additional ones here as they land.
+    # Each migration's ``migrate()`` must be idempotent + safe to call on
+    # every heartbeat tick.
+    try:
+        from worker_control_hermes.migrations._2026_split_claude_parity import (
+            migrate as _split_claude_parity,
+        )
+        _split_claude_parity(conn)
+    except Exception:
+        # Never let a migration hiccup take down the heartbeat — the
+        # out-of-band ``workerctl-hermes-migrate`` CLI remains the
+        # authoritative recovery path.
+        pass
     worker_names = _worker_name_lookup(conn)
     claude_watermarks = _existing_claude_watermarks(conn)
     hermes_watermarks = _existing_hermes_watermarks(conn)
