@@ -41,9 +41,22 @@
   --fs-lg:   16px;   /* table body, panel title backup */
   --fs-xl:   18px;   /* panel title */
   --fs-xxl:  30px;   /* numeric stat card value */
+
+  /* Viewport-fit list layout. The session tables compute "auto" page size
+     by dividing the visible list-area height by --row-h, so this value is
+     a hint not a hard cell height — rows with rich recap cards still grow
+     vertically. Tune this if the auto page is consistently off. */
+  --row-h: 96px;
+  --shell-pad-x: 20px;
+  --shell-pad-y: 16px;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  overflow: hidden;
+}
 body {
   font-family: var(--sans);
   font-size: var(--fs-base);
@@ -53,7 +66,8 @@ body {
     radial-gradient(1200px 700px at 100% -10%, rgba(124,242,195,0.07), transparent 60%),
     radial-gradient(900px 500px at -10% 110%, rgba(126,182,255,0.07), transparent 60%),
     var(--bg-0);
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   -webkit-font-smoothing: antialiased;
 }
 a { color: var(--info); text-decoration: none; }
@@ -63,9 +77,18 @@ a:hover { text-decoration: underline; }
 code, .mono { font-family: var(--mono); }
 
 .shell {
-  max-width: 1320px;
-  margin: 0 auto;
-  padding: 32px 28px 96px;
+  /* Full-width viewport-fit layout. The page is one big flex column where
+     header / banner / roots / summary / tabs sit fixed at the top and the
+     active panel grows to fill the rest. No outer max-width — wide screens
+     finally get to use their horizontal real-estate, with a small inner
+     padding so columns don't kiss the edges. */
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  padding: var(--shell-pad-y) var(--shell-pad-x);
+  overflow: hidden;
 }
 
 /* --- header --- */
@@ -73,11 +96,34 @@ code, .mono { font-family: var(--mono); }
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 24px;
-  padding-bottom: 22px;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--line);
-  margin-bottom: 24px;
+  margin-bottom: 12px;
+  flex: 0 0 auto;
 }
+
+/* Stats-collapse toggle — lives in the header tools strip. Pure text+arrow
+   button so it doesn't fight the existing meta typography. */
+.stats-toggle {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  color: var(--text-1);
+  padding: 4px 10px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-family: var(--mono);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.stats-toggle:hover { background: var(--bg-2); }
+.stats-toggle .chev { transition: transform 0.2s; }
+body.stats-collapsed .stats-toggle .chev { transform: rotate(-90deg); }
+body.stats-collapsed #summary { display: none; }
 .brand { display: flex; align-items: center; gap: 14px; }
 .brand-mark {
   width: 44px; height: 44px; border-radius: 12px;
@@ -114,9 +160,10 @@ code, .mono { font-family: var(--mono); }
 /* --- summary cards --- */
 .summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 14px;
-  margin-bottom: 22px;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+  flex: 0 0 auto;
 }
 .card {
   background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
@@ -147,10 +194,11 @@ code, .mono { font-family: var(--mono); }
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: 12px;
-  margin-bottom: 18px;
+  margin-bottom: 10px;
   width: max-content;
   max-width: 100%;
   overflow-x: auto;
+  flex: 0 0 auto;
 }
 .tab {
   background: transparent; color: var(--text-2);
@@ -173,11 +221,32 @@ code, .mono { font-family: var(--mono); }
 
 /* --- panels --- */
 .panel { display: none; }
-.panel[aria-current="true"] { display: block; }
+.panel[aria-current="true"] {
+  /* The active panel is the viewport-fit area: panel-head + scrollable
+     table-wrap + pagination, top-down. Only the table-wrap scrolls — the
+     head and pager stay anchored so the user always sees the filters and
+     the page controls. */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .panel-head {
   display: flex; gap: 12px; flex-wrap: wrap;
   align-items: center; justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+  flex: 0 0 auto;
+}
+.panel-desc {
+  /* The descriptive paragraph above each table is informative but eats
+     significant vertical real-estate. Clamp to two lines + show full text
+     on hover so the list-area gets the room it actually needs. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 .panel-title { font-size: var(--fs-xl); color: var(--text-0); font-weight: 600; }
 .panel-desc { color: var(--text-2); font-size: var(--fs-sm); }
@@ -213,13 +282,21 @@ code, .mono { font-family: var(--mono); }
   background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
   border: 1px solid var(--line);
   border-radius: 14px;
-  overflow: hidden;
   box-shadow: var(--shadow);
+  /* List-area: this is the only element in the page-shell that scrolls.
+     Horizontal scroll kicks in only when the column min-widths exceed the
+     viewport (very narrow windows). Sticky thead keeps headers in view as
+     the user scrolls down. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
 }
 table {
   border-collapse: collapse;
   width: 100%;
   font-size: var(--fs-lg);
+  table-layout: auto;
 }
 thead th {
   text-align: left;
@@ -228,16 +305,81 @@ thead th {
   font-size: var(--fs-sm);
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  padding: 14px 16px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--line);
-  background: rgba(255,255,255,0.015);
+  background: var(--bg-2);
   white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 tbody td {
-  padding: 14px 16px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
   color: var(--text-1);
+}
+
+/* Column width hints — single source of truth so the same matrix applies
+   to both hermes / native ledger tables. We use min-width / max-width
+   pairs rather than fixed widths so the table-layout: auto algorithm can
+   redistribute slack to the brief/title column (the only one with
+   meaningful flex content). */
+th.col-id,    td.col-id    { min-width: 56px;  max-width: 80px; }
+th.col-name,  td.col-name  { min-width: 280px; }   /* brief/ai_title — flex residual */
+th.col-class, td.col-class { min-width: 110px; max-width: 150px; }
+th.col-disp,  td.col-disp  { min-width: 130px; max-width: 200px; }
+th.col-runs,  td.col-runs  { min-width: 86px;  max-width: 110px; }
+th.col-status,td.col-status{ min-width: 88px;  max-width: 110px; }
+th.col-proj,  td.col-proj  { min-width: 140px; max-width: 28vw; }
+th.col-uuid,  td.col-uuid  { min-width: 96px;  max-width: 120px; font-family: var(--mono); }
+th.col-time,  td.col-time  { min-width: 92px;  max-width: 160px; }
+th.col-hsid,  td.col-hsid  { min-width: 140px; max-width: 220px; }
+th.col-prof,  td.col-prof  { min-width: 120px; max-width: 180px; }
+th.col-msg,   td.col-msg   { min-width: 280px; }
+th.col-turns, td.col-turns { min-width: 64px;  max-width: 90px; }
+th.col-model, td.col-model { min-width: 110px; max-width: 180px; }
+th.col-spawn, td.col-spawn { min-width: 140px; max-width: 32vw; }
+th.col-tr,    td.col-tr    { min-width: 120px; max-width: 180px; }
+
+/* Brief / ai_title get a 2-line clamp so a long single message doesn't
+   blow the row up to 6 lines. The recap card below still expands as
+   needed — only the ai_title and brief preview clamp. */
+.ai-title, td.col-name .path {
+  max-width: 100%;
+}
+.ai-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Project cell — name + path stacked, with ellipsis on the path so long
+   absolute paths don't push the column out. Full path remains accessible
+   via the title attribute set by the renderer. */
+td.col-proj .path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* Responsive column hiding — narrower viewports drop the least essential
+   columns first. UUID is the cheapest (already truncated to 8 chars in
+   table; the recap card retains the full id elsewhere). git_branch /
+   claude_version live in parityMetaHtml so they're hidden via a body
+   class rather than nth-child. */
+body.viewport-narrow .col-uuid { display: none; }
+body.viewport-tiny .msg-counts.git-branch,
+body.viewport-tiny .msg-counts.claude-ver { display: none; }
+@media (max-width: 1200px) {
+  th.col-uuid, td.col-uuid { display: none; }
+}
+@media (max-width: 900px) {
+  .msg-counts.git-branch,
+  .msg-counts.claude-ver { display: none; }
 }
 tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover td { background: rgba(255,255,255,0.025); }
@@ -317,8 +459,11 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: var(--fs-md)
 }
 .roots {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 10px; margin-bottom: 18px;
+  gap: 8px; margin-bottom: 10px;
+  flex: 0 0 auto;
 }
+body.stats-collapsed .roots { display: none; }
+#boot-banner { flex: 0 0 auto; }
 
 /* ── legacy-parity recap card (mirrors sites/1143 report) ─────────────── */
 .recap {
@@ -419,7 +564,9 @@ tr.row-flash.row-flash-fade > td { outline-color: transparent; }
    table. Page-size selector + "← prev" / "next →" + "page m / n" label. */
 .pagination {
   display: flex; gap: 12px; align-items: center; justify-content: flex-end;
-  margin-top: 10px; font-size: var(--fs-sm); color: var(--text-2);
+  margin-top: 8px; font-size: var(--fs-sm); color: var(--text-2);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
 }
 .pagination button {
   background: var(--bg-1); color: var(--text-0);
@@ -507,6 +654,10 @@ body.show-tools .recap-tools { display: block; }
         <input type="checkbox" id="opt-show-tools" />
         도구 호출 보기
       </label>
+      <button type="button" class="stats-toggle" id="opt-stats-collapse"
+              title="상단 통계 카드 접기/펼치기 — localStorage 영속">
+        <span class="chev">▾</span><span>통계 카드</span>
+      </button>
     </div>
   </header>
 
@@ -601,14 +752,14 @@ body.show-tools .recap-tools { display: block; }
       <table>
         <thead>
           <tr>
-            <th class="sortable" data-sort-key="hermes_session_id">session id</th>
-            <th class="sortable" data-sort-key="profile_name">profile</th>
-            <th>첫 메시지</th>
-            <th class="sortable" data-sort-key="turn_count">turns</th>
-            <th>모델</th>
-            <th>spawned claude</th>
-            <th>transcript</th>
-            <th class="sortable" data-sort-key="transcript_mtime">mtime</th>
+            <th class="sortable col-hsid" data-sort-key="hermes_session_id">session id</th>
+            <th class="sortable col-prof" data-sort-key="profile_name">profile</th>
+            <th class="col-msg">첫 메시지</th>
+            <th class="sortable col-turns" data-sort-key="turn_count">turns</th>
+            <th class="col-model">모델</th>
+            <th class="col-spawn">spawned claude</th>
+            <th class="col-tr">transcript</th>
+            <th class="sortable col-time" data-sort-key="transcript_mtime">mtime</th>
           </tr>
         </thead>
         <tbody id="t-hermes-agent"></tbody>
@@ -655,14 +806,14 @@ body.show-tools .recap-tools { display: block; }
       <table>
         <thead>
           <tr>
-            <th class="sortable" data-sort-key="id">#</th>
-            <th class="sortable" data-sort-key="name">이름</th>
-            <th>마지막 dispatch</th>
-            <th class="sortable" data-sort-key="run_count">runs (-p / total)</th>
-            <th class="sortable" data-sort-key="display_status">상태</th>
-            <th class="sortable" data-sort-key="project_name">프로젝트</th>
-            <th>UUID</th>
-            <th class="sortable" data-sort-key="last_used_at">last used</th>
+            <th class="sortable col-id" data-sort-key="id">#</th>
+            <th class="sortable col-name" data-sort-key="name">이름</th>
+            <th class="col-disp">마지막 dispatch</th>
+            <th class="sortable col-runs" data-sort-key="run_count">runs (-p / total)</th>
+            <th class="sortable col-status" data-sort-key="display_status">상태</th>
+            <th class="sortable col-proj" data-sort-key="project_name">프로젝트</th>
+            <th class="col-uuid">UUID</th>
+            <th class="sortable col-time" data-sort-key="last_used_at">last used</th>
           </tr>
         </thead>
         <tbody id="t-hermes"></tbody>
@@ -705,15 +856,15 @@ body.show-tools .recap-tools { display: block; }
       <table>
         <thead>
           <tr>
-            <th class="sortable" data-sort-key="id">#</th>
-            <th class="sortable" data-sort-key="name">이름</th>
-            <th>분류</th>
-            <th>마지막 dispatch</th>
-            <th class="sortable" data-sort-key="run_count">runs (-p / total)</th>
-            <th class="sortable" data-sort-key="display_status">상태</th>
-            <th class="sortable" data-sort-key="project_name">프로젝트</th>
-            <th>UUID</th>
-            <th class="sortable" data-sort-key="last_used_at">last used</th>
+            <th class="sortable col-id" data-sort-key="id">#</th>
+            <th class="sortable col-name" data-sort-key="name">이름</th>
+            <th class="col-class">분류</th>
+            <th class="col-disp">마지막 dispatch</th>
+            <th class="sortable col-runs" data-sort-key="run_count">runs (-p / total)</th>
+            <th class="sortable col-status" data-sort-key="display_status">상태</th>
+            <th class="sortable col-proj" data-sort-key="project_name">프로젝트</th>
+            <th class="col-uuid">UUID</th>
+            <th class="sortable col-time" data-sort-key="last_used_at">last used</th>
           </tr>
         </thead>
         <tbody id="t-native"></tbody>
@@ -786,14 +937,28 @@ body.show-tools .recap-tools { display: block; }
   // ── persistent UI state — page size + sort + tools-toggle ─────────────
   // Stored in localStorage so the user's choice survives reloads and the
   // 5-second snapshot poll doesn't reset what they're looking at.
-  const LS_PAGE_SIZE   = "dashboard.pageSize";
-  const LS_SHOW_TOOLS  = "dashboard.showTools";
-  const PAGE_SIZE_OPTS = [25, 50, 100, 200];
+  const LS_PAGE_SIZE     = "dashboard.pageSize";
+  const LS_SHOW_TOOLS    = "dashboard.showTools";
+  const LS_STATS_COLLAPS = "dashboard.statsCollapsed";
+  // Page size options. "auto" is the default — it measures the visible
+  // list-area height and divides by --row-h so the table exactly fills
+  // the viewport with no full-page scroll. Numeric options stay for users
+  // who want a stable count regardless of window size.
+  const PAGE_SIZE_OPTS  = ["auto", 25, 50, 100, 200];
   function readPageSize() {
-    const raw = parseInt(localStorage.getItem(LS_PAGE_SIZE) || "", 10);
-    return PAGE_SIZE_OPTS.indexOf(raw) >= 0 ? raw : 50;
+    const raw = localStorage.getItem(LS_PAGE_SIZE);
+    if (raw === "auto") return "auto";
+    const n = parseInt(raw || "", 10);
+    return PAGE_SIZE_OPTS.indexOf(n) >= 0 ? n : "auto";
   }
   let pageSize = readPageSize();
+  // The computed page size used when pageSize === "auto". Recomputed by
+  // recomputeAutoPageSize() on window resize, panel switch, and stats
+  // collapse — anything that changes the list-area's available height.
+  let autoPageSize = 12;
+  function effectivePageSize() {
+    return pageSize === "auto" ? autoPageSize : pageSize;
+  }
   // Per-panel pagination + sort state — current page, sort column, dir.
   const panelState = {
     "hermes":       { page: 1, sortKey: "last_used_at",  sortDir: "desc" },
@@ -1196,8 +1361,8 @@ body.show-tools .recap-tools { display: block; }
       // full chip block lives under the recap-tools toggle.
       parts.push("<span class='msg-counts tools'>🔧 tools×" + (s.msg_tool || 0) + "</span>");
     }
-    if (s.git_branch)     parts.push("<span class='msg-counts'>⎇ " + escapeHtml(s.git_branch) + "</span>");
-    if (s.claude_version) parts.push("<span class='msg-counts'>v" + escapeHtml(s.claude_version) + "</span>");
+    if (s.git_branch)     parts.push("<span class='msg-counts git-branch'>⎇ " + escapeHtml(s.git_branch) + "</span>");
+    if (s.claude_version) parts.push("<span class='msg-counts claude-ver'>v" + escapeHtml(s.claude_version) + "</span>");
     const tsRaw = s.last_used_at || s.transcript_mtime || s.ended_at;
     const rel = relativeAge(tsRaw);
     if (rel) {
@@ -1322,25 +1487,34 @@ body.show-tools .recap-tools { display: block; }
     // The row carries `data-row-uuid` so the hermes→spawn jump handler
     // can scrollIntoView + flash-highlight without re-querying by index.
     const rowUuid = s.uuid ? (" data-row-uuid='" + escapeHtml(s.uuid) + "'") : "";
+    // UUID display: full uuid is in the tooltip; we show the LAST 8 chars
+    // because they're what distinguishes spawn siblings (the first half is
+    // often shared prefix/timestamp bits when claude spawns in bursts).
+    const fullUuid = s.uuid || "";
+    const uuidTail = fullUuid.length > 8 ? fullUuid.slice(-8) : fullUuid;
+    const projPath = s.project_path
+      ? ("<div class='path' title='" + escapeHtml(s.project_path) + "'>"
+          + escapeHtml(s.project_path) + "</div>")
+      : "";
     return ""
       + "<tr" + rowUuid + ">"
-      +   "<td class='mono'>" + s.id + "</td>"
-      +   "<td><strong>" + escapeHtml(s.name || "—") + "</strong>"
+      +   "<td class='mono col-id'>" + s.id + "</td>"
+      +   "<td class='col-name'><strong>" + escapeHtml(s.name || "—") + "</strong>"
       +       claudeName + titleLine + briefDiv + meta + recap + "</td>"
-      +   (showClass ? "<td>" + ledgerClassBadge(s) + "</td>" : "")
-      +   "<td>" + ledgerModeBadge(s.dispatch_mode)
+      +   (showClass ? "<td class='col-class'>" + ledgerClassBadge(s) + "</td>" : "")
+      +   "<td class='col-disp'>" + ledgerModeBadge(s.dispatch_mode)
       +     "<div class='path'>" + escapeHtml(lastRunTime) + "</div>"
       +     lastRun + "</td>"
-      +   "<td class='mono'>" + runCounts + "</td>"
-      +   "<td>" + ledgerStatusPill(s) + "</td>"
-      +   "<td>"
-      +     "<div>" + escapeHtml(s.project_name || "—") + "</div>"
-      +     (s.project_path
-              ? "<div class='path'>" + escapeHtml(s.project_path) + "</div>"
-              : "")
+      +   "<td class='mono col-runs'>" + runCounts + "</td>"
+      +   "<td class='col-status'>" + ledgerStatusPill(s) + "</td>"
+      +   "<td class='col-proj'>"
+      +     "<div title='" + escapeHtml(s.project_name || "") + "'>"
+      +       escapeHtml(s.project_name || "—") + "</div>"
+      +     projPath
       +   "</td>"
-      +   "<td class='mono'>" + escapeHtml((s.uuid || "").slice(0, 8)) + "</td>"
-      +   "<td class='mono'>" + escapeHtml(s.last_used_at || "—") + "</td>"
+      +   "<td class='mono col-uuid' title='" + escapeHtml(fullUuid) + "'>"
+      +     escapeHtml(uuidTail) + "</td>"
+      +   "<td class='mono col-time'>" + escapeHtml(s.last_used_at || "—") + "</td>"
       + "</tr>";
   }
   function filterLedgerRow(s, ft) {
@@ -1376,12 +1550,13 @@ body.show-tools .recap-tools { display: block; }
   function paginate(rows, panel) {
     const st = panelState[panel];
     if (!st) return { rows: rows, totalPages: 1, page: 1 };
-    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    const eff = effectivePageSize();
+    const totalPages = Math.max(1, Math.ceil(rows.length / eff));
     if (st.page > totalPages) st.page = totalPages;
     if (st.page < 1) st.page = 1;
-    const start = (st.page - 1) * pageSize;
+    const start = (st.page - 1) * eff;
     return {
-      rows: rows.slice(start, start + pageSize),
+      rows: rows.slice(start, start + eff),
       totalPages: totalPages,
       page: st.page,
       total: rows.length
@@ -1393,9 +1568,14 @@ body.show-tools .recap-tools { display: block; }
     if (!info.total) { el.innerHTML = ""; return; }
     const prevDis = info.page <= 1 ? " disabled" : "";
     const nextDis = info.page >= info.totalPages ? " disabled" : "";
+    // Build the size selector. "auto" shows the live computed value so
+    // the user can see what the auto-fit decided without opening devtools.
     const sizeOpts = PAGE_SIZE_OPTS.map(function(n) {
-      return "<option value='" + n + "'" + (n === pageSize ? " selected" : "") + ">"
-        + n + "/페이지</option>";
+      const sel = (n === pageSize) ? " selected" : "";
+      const label = (n === "auto")
+        ? ("auto (" + autoPageSize + "/페이지)")
+        : (n + "/페이지");
+      return "<option value='" + n + "'" + sel + ">" + label + "</option>";
     }).join("");
     el.innerHTML =
       "<span class='pageinfo'>" + info.total + "건</span>"
@@ -1571,15 +1751,16 @@ body.show-tools .recap-tools { display: block; }
         : "<span class='path'>—</span>";
       return ""
         + "<tr>"
-        +   "<td class='mono'>" + escapeHtml(r.hermes_session_id) + "</td>"
-        +   "<td>" + escapeHtml(r.profile_name || "—")
+        +   "<td class='mono col-hsid' title='" + escapeHtml(r.hermes_session_id || "") + "'>"
+        +     escapeHtml(r.hermes_session_id) + "</td>"
+        +   "<td class='col-prof'>" + escapeHtml(r.profile_name || "—")
         +     "<div class='path'>" + viaBadge(r.discovered_via) + "</div></td>"
-        +   "<td>" + firstMsg + meta + recap + "</td>"
-        +   "<td>" + turnsCell + "</td>"
-        +   "<td>" + modelCell + "</td>"
-        +   "<td>" + spawnList(r) + "</td>"
-        +   "<td>" + transcriptCell(r) + "</td>"
-        +   "<td class='mono'>" + escapeHtml(r.transcript_mtime || r.ended_at || "—") + "</td>"
+        +   "<td class='col-msg'>" + firstMsg + meta + recap + "</td>"
+        +   "<td class='col-turns'>" + turnsCell + "</td>"
+        +   "<td class='col-model'>" + modelCell + "</td>"
+        +   "<td class='col-spawn'>" + spawnList(r) + "</td>"
+        +   "<td class='col-tr'>" + transcriptCell(r) + "</td>"
+        +   "<td class='mono col-time'>" + escapeHtml(r.transcript_mtime || r.ended_at || "—") + "</td>"
         + "</tr>";
     }).join("");
     renderPager(page, "hermes-agent");
@@ -1802,13 +1983,20 @@ body.show-tools .recap-tools { display: block; }
     const t = ev.target;
     if (!t || !t.matches) return;
     if (t.matches("[data-page-size]")) {
-      const n = parseInt(t.value, 10);
-      if (PAGE_SIZE_OPTS.indexOf(n) >= 0) {
-        pageSize = n;
-        localStorage.setItem(LS_PAGE_SIZE, String(n));
+      const raw = t.value;
+      let next = null;
+      if (raw === "auto") next = "auto";
+      else {
+        const n = parseInt(raw, 10);
+        if (PAGE_SIZE_OPTS.indexOf(n) >= 0) next = n;
+      }
+      if (next !== null) {
+        pageSize = next;
+        localStorage.setItem(LS_PAGE_SIZE, String(next));
         // Reset every panel to page 1 — current page numbers were valid
         // for the old size and don't carry over.
         Object.keys(panelState).forEach(resetPage);
+        if (pageSize === "auto") recomputeAutoPageSize();
         repaintTables();
       }
     }
@@ -1853,8 +2041,114 @@ body.show-tools .recap-tools { display: block; }
       }
     });
   }
+
+  // Stats-collapse toggle — hides the big summary grid (and the workspace
+  // roots strip) to reclaim vertical space for the table. Persisted to
+  // localStorage so the choice survives reloads. Toggling also triggers
+  // an auto-page-size recompute because the list-area grew or shrank.
+  if (localStorage.getItem(LS_STATS_COLLAPS) === "1") {
+    document.body.classList.add("stats-collapsed");
+  }
+  const statsToggle = document.getElementById("opt-stats-collapse");
+  if (statsToggle) {
+    statsToggle.addEventListener("click", function() {
+      const collapsed = document.body.classList.toggle("stats-collapsed");
+      localStorage.setItem(LS_STATS_COLLAPS, collapsed ? "1" : "0");
+      // Defer the recompute one frame so the layout has settled before
+      // we measure the new list-area height.
+      requestAnimationFrame(function() {
+        if (pageSize === "auto") {
+          recomputeAutoPageSize();
+          repaintTables();
+        }
+      });
+    });
+  }
+
+  // ── auto page-size — compute rows that fit the visible list-area ──────
+  // We read --row-h off :root so the user / a future theme override can
+  // tune it without touching JS. The first row of each table is the
+  // sticky thead (~42px after our padding tweak) — we subtract it so the
+  // count reflects body rows only. Floor + clamp to a sane minimum so
+  // tiny windows still show at least a few rows.
+  function readRowH() {
+    const v = getComputedStyle(document.documentElement)
+      .getPropertyValue("--row-h").trim();
+    const n = parseInt(v, 10);
+    return (n && n > 0) ? n : 96;
+  }
+  function recomputeAutoPageSize() {
+    // Measure the active panel's table-wrap; fall back to any visible
+    // table-wrap (during initial paint before a tab is active).
+    let wrap = document.querySelector(".panel[aria-current='true'] .table-wrap");
+    if (!wrap) wrap = document.querySelector(".table-wrap");
+    if (!wrap) return;
+    const h = wrap.clientHeight;
+    if (h <= 0) return;
+    const rowH = readRowH();
+    const headerOffset = 44; // sticky thead + 1px borders
+    const next = Math.max(5, Math.floor((h - headerOffset) / rowH));
+    if (next !== autoPageSize) {
+      autoPageSize = next;
+    }
+  }
+
+  // ResizeObserver — drives the auto recompute whenever the viewport, the
+  // sidebar, or the stats-collapse state changes the list-area height.
+  // We observe the shell rather than each table-wrap because only one
+  // panel is active at a time and the shell's height tracks the window.
+  const shellEl = document.querySelector(".shell");
+  if (shellEl && typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(function() {
+      if (pageSize !== "auto") return;
+      const prev = autoPageSize;
+      recomputeAutoPageSize();
+      if (prev !== autoPageSize) repaintTables();
+    });
+    ro.observe(shellEl);
+  }
+  // Window resize as a fallback (and for browsers without ResizeObserver
+  // semantics around flex children).
+  window.addEventListener("resize", function() {
+    if (pageSize !== "auto") return;
+    const prev = autoPageSize;
+    recomputeAutoPageSize();
+    if (prev !== autoPageSize) repaintTables();
+  });
+
+  // Tab switching may swap which panel's table-wrap is measurable — we
+  // hook onto every tab click to recompute and repaint.
+  document.querySelectorAll(".tab").forEach(function(t) {
+    t.addEventListener("click", function() {
+      requestAnimationFrame(function() {
+        if (pageSize === "auto") {
+          recomputeAutoPageSize();
+          repaintTables();
+        }
+      });
+    });
+  });
+
+  // Narrow-viewport body class — supplements the @media rules so JS code
+  // paths can also branch on it (e.g. parityMetaHtml chip count).
+  function syncViewportClass() {
+    const w = window.innerWidth;
+    document.body.classList.toggle("viewport-narrow", w < 1200);
+    document.body.classList.toggle("viewport-tiny",   w < 900);
+  }
+  syncViewportClass();
+  window.addEventListener("resize", syncViewportClass);
   function repaintAll() {
     paintMeta();
+    // Layout settles after meta paint — recompute auto page size before
+    // table paints so the first frame already has the right slice.
+    if (pageSize === "auto") {
+      requestAnimationFrame(function() {
+        const prev = autoPageSize;
+        recomputeAutoPageSize();
+        if (prev !== autoPageSize) repaintTables();
+      });
+    }
     repaintTables();
   }
 
