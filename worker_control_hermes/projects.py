@@ -1065,6 +1065,71 @@ def cmd_run_end(args: argparse.Namespace) -> None:
         print(f"session {promoted[0]} ({promoted[1]}) → done  [spawn auto-promote]")
 
 
+def _stale_started_a_ok_runs(conn: sqlite3.Connection, max_age_hours: float) -> list[sqlite3.Row]:
+    """Return rows in ``hermes_runs`` that look orphaned.
+
+    Criteria:
+      * ``status = 'started'``
+      * ``name LIKE 'a-ok:%'`` — only sweep dispatcher-owned runs
+      * ``started_at`` older than ``max_age_hours`` ago
+
+    The cutoff comparison uses ISO-8601 lexicographic ordering, which
+    works correctly for UTC ``T``-separated stamps with seconds resolution
+    (the only format ``_now()`` emits).
+    """
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(hours=max_age_hours)).isoformat(timespec="seconds")
+    return conn.execute(
+        "SELECT r.*, s.uuid AS session_uuid, s.name AS session_name "
+        "FROM hermes_runs r "
+        "JOIN hermes_sessions s ON s.id = r.session_id "
+        "WHERE r.status = 'started' AND r.name LIKE 'a-ok:%' AND r.started_at < ? "
+        "ORDER BY r.started_at ASC",
+        (cutoff,),
+    ).fetchall()
+
+
+def cmd_runs_sweep(args: argparse.Namespace) -> None:
+    """Mark long-stuck `started` a-ok: runs as `failed` (safety-net).
+
+    Belt-and-suspenders for the rare cases where the trap-based wrapper
+    is bypassed: SIGKILL on the bash subshell, OOM-killed claude binary,
+    machine power loss between trap-fire and the SQLite UPDATE.
+
+    Auto-promote in ``cmd_run_end`` only fires on ``--status done``,
+    so a swept (failed) run leaves its session in ``active`` — by
+    design. The user can then inspect and manually decide whether to
+    abandon the session or revive it.
+    """
+    with _connect() as conn:
+        rows = _stale_started_a_ok_runs(conn, args.max_age_hours)
+        if not rows:
+            print(f"(no stale a-ok: started runs older than {args.max_age_hours}h)")
+            return
+        now = _now()
+        note = f"sweep: started_at>{args.max_age_hours}h no end-call"
+        if args.dry_run:
+            print(f"DRY-RUN — would mark {len(rows)} run(s) as failed "
+                  f"(cutoff={args.max_age_hours}h):")
+        else:
+            for r in rows:
+                conn.execute(
+                    "UPDATE hermes_runs SET status='failed', ended_at=?, note=? WHERE id=?",
+                    (now, note, r["id"]),
+                )
+            print(f"swept {len(rows)} run(s) (cutoff={args.max_age_hours}h):")
+        for r in rows:
+            print(f"  run #{r['id']:>5}  {r['started_at']}  "
+                  f"session={r['session_uuid'][:8]}  name={r['name']}")
+        if args.json:
+            print(json.dumps({
+                "swept_count": 0 if args.dry_run else len(rows),
+                "candidates": [dict(r) for r in rows],
+                "dry_run": bool(args.dry_run),
+                "max_age_hours": args.max_age_hours,
+            }, ensure_ascii=False, indent=2))
+
+
 def cmd_runs_list(args: argparse.Namespace) -> None:
     where, params = [], []
     if args.session:
@@ -1244,12 +1309,36 @@ def main() -> None:
     rr_end.add_argument("--note", help="freeform outcome note")
     rr_end.set_defaults(fn=cmd_run_end)
 
-    runs = sub.add_parser("runs", help="list runs (timeline view)")
+    runs = sub.add_parser("runs", help="list runs / sweep stale runs")
+    # Legacy flags stay on the `runs` parser itself so the existing
+    # documented form `runs --session <key> --status started` keeps
+    # working without forcing the user to write `runs list ...`.
     runs.add_argument("--session", help="filter by session key")
     runs.add_argument("--status", choices=["started", "done", "failed"])
     runs.add_argument("--limit", type=int, default=50)
     runs.add_argument("--json", action="store_true")
     runs.set_defaults(fn=cmd_runs_list)
+    runs_sub = runs.add_subparsers(dest="runs_cmd")
+
+    runs_list = runs_sub.add_parser("list", help="list runs (default if no subcommand)")
+    runs_list.add_argument("--session", help="filter by session key")
+    runs_list.add_argument("--status", choices=["started", "done", "failed"])
+    runs_list.add_argument("--limit", type=int, default=50)
+    runs_list.add_argument("--json", action="store_true")
+    runs_list.set_defaults(fn=cmd_runs_list)
+
+    runs_sweep = runs_sub.add_parser(
+        "sweep",
+        help="mark long-stuck `started` a-ok: runs as failed (safety-net "
+             "for runs whose self-close wrapper was bypassed, e.g. SIGKILL).",
+    )
+    runs_sweep.add_argument("--max-age-hours", type=float, default=24.0,
+                            help="only sweep runs whose started_at is older "
+                                 "than this many hours (default 24).")
+    runs_sweep.add_argument("--dry-run", action="store_true",
+                            help="report what would be swept without writing.")
+    runs_sweep.add_argument("--json", action="store_true")
+    runs_sweep.set_defaults(fn=cmd_runs_sweep)
 
     args = p.parse_args()
     if args.db:

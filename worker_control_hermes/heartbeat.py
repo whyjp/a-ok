@@ -480,6 +480,27 @@ def classify_sessions(window_min: int) -> dict:
     for bucket in (alive, just_ended, idle):
         bucket.sort(key=lambda s: s.get("_last") or NOW, reverse=True)
 
+    # Sweep candidates — a-ok: runs stuck in 'started' beyond the default
+    # safety-net window (24h). These would be cleaned by
+    # `workerctl-hermes-projects runs sweep`. Surfaced here so an operator
+    # scrolling the heartbeat snapshot sees the leak before the user does.
+    sweep_candidates: list[dict] = []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cutoff_iso = (NOW - _dt.timedelta(hours=24)).isoformat(timespec="seconds")
+        sweep_candidates = [dict(r) for r in conn.execute(
+            "SELECT r.id, r.name, r.started_at, s.uuid AS session_uuid "
+            "FROM hermes_runs r JOIN hermes_sessions s ON s.id = r.session_id "
+            "WHERE r.status='started' AND r.name LIKE 'a-ok:%' "
+            "AND r.started_at < ? "
+            "ORDER BY r.started_at ASC",
+            (cutoff_iso,),
+        ).fetchall()]
+        conn.close()
+    except Exception as e:
+        print(f"[sweep-probe] failed: {e!r}", file=sys.stderr)
+
     return {
         "alive": alive,
         "just_ended": just_ended,
@@ -488,6 +509,7 @@ def classify_sessions(window_min: int) -> dict:
         "total_db_sessions": len(db_uuids),
         "total_jsonl_sessions": len(jsonl),
         "subprocs_stats": subprocs_stats,
+        "sweep_candidates": sweep_candidates,
     }
 
 
@@ -595,6 +617,21 @@ def render_text(snap: dict) -> str:
         lines.append("")
     if not (n_alive or n_ended or n_idle):
         lines.append("(아무 활동 없음 — 마지막 30분 동안 어떤 claude 세션도 움직이지 않음)")
+    sweep = snap.get("sweep_candidates") or []
+    if sweep:
+        lines.append("")
+        lines.append(
+            f"🧹 SWEEP CANDIDATES — {len(sweep)}  "
+            f"(a-ok: runs stuck `started` >24h — run "
+            f"`workerctl-hermes-projects runs sweep` to clean)"
+        )
+        for r in sweep[:5]:
+            lines.append(
+                f"  run #{r['id']:>5}  started_at={r['started_at']}  "
+                f"name={r['name']}"
+            )
+        if len(sweep) > 5:
+            lines.append(f"  … +{len(sweep) - 5} more")
     return "\n".join(lines).rstrip()
 
 
