@@ -29,12 +29,24 @@
   --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Consolas, "Liberation Mono", monospace;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR",
           "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+
+  /* Type scale — single source of truth. Changing --fs-base proportionally
+     resizes the whole dashboard (chart cards / table rows / chips). The
+     +20% bump (14 → 17) was requested for screen-reading ergonomics; sizes
+     below derive from it so we never have orphan 11/12 px text. */
+  --fs-base: 17px;
+  --fs-xs:   12px;   /* tiny meta chips, kbd caps */
+  --fs-sm:   13px;   /* chip text, recap meta, secondary badges */
+  --fs-md:   14px;   /* secondary body / table caption */
+  --fs-lg:   16px;   /* table body, panel title backup */
+  --fs-xl:   18px;   /* panel title */
+  --fs-xxl:  30px;   /* numeric stat card value */
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-base);
   line-height: 1.55;
   color: var(--text-1);
   background:
@@ -84,16 +96,16 @@ code, .mono { font-family: var(--mono); }
   border-radius: 4px;
 }
 .brand-text h1 {
-  margin: 0; font-size: 18px; letter-spacing: 0.02em;
+  margin: 0; font-size: 22px; letter-spacing: 0.02em;
   color: var(--text-0); font-weight: 600;
 }
 .brand-text .sub {
-  margin-top: 2px; font-size: 12px; color: var(--text-2);
+  margin-top: 2px; font-size: var(--fs-sm); color: var(--text-2);
   font-family: var(--mono);
 }
 .meta {
   display: flex; gap: 18px; flex-wrap: wrap; justify-content: flex-end;
-  font-size: 12px; color: var(--text-2);
+  font-size: var(--fs-sm); color: var(--text-2);
   font-family: var(--mono);
 }
 .meta div span { color: var(--text-0); }
@@ -116,14 +128,14 @@ code, .mono { font-family: var(--mono); }
   box-shadow: var(--shadow);
 }
 .card .label {
-  font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+  font-size: var(--fs-sm); letter-spacing: 0.18em; text-transform: uppercase;
   color: var(--text-3);
 }
 .card .value {
-  font-family: var(--mono); font-size: 26px; color: var(--text-0);
+  font-family: var(--mono); font-size: var(--fs-xxl); color: var(--text-0);
   margin-top: 8px; letter-spacing: -0.01em;
 }
-.card .hint { font-size: 11px; color: var(--text-2); margin-top: 4px; }
+.card .hint { font-size: var(--fs-sm); color: var(--text-2); margin-top: 4px; }
 .card.accent .value { color: var(--accent); }
 .card.warn .value { color: var(--warn); }
 .card.info .value { color: var(--info); }
@@ -154,7 +166,7 @@ code, .mono { font-family: var(--mono); }
   box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 .tab .pill {
-  font-family: var(--mono); font-size: 11px; color: var(--text-2);
+  font-family: var(--mono); font-size: var(--fs-sm); color: var(--text-2);
   padding: 1px 7px; border-radius: 999px;
   background: var(--bg-3); border: 1px solid var(--line);
 }
@@ -167,8 +179,8 @@ code, .mono { font-family: var(--mono); }
   align-items: center; justify-content: space-between;
   margin-bottom: 12px;
 }
-.panel-title { font-size: 16px; color: var(--text-0); font-weight: 600; }
-.panel-desc { color: var(--text-2); font-size: 12px; }
+.panel-title { font-size: var(--fs-xl); color: var(--text-0); font-weight: 600; }
+.panel-desc { color: var(--text-2); font-size: var(--fs-sm); }
 .panel-tools {
   display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
 }
@@ -207,41 +219,41 @@ code, .mono { font-family: var(--mono); }
 table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 13px;
+  font-size: var(--fs-lg);
 }
 thead th {
   text-align: left;
   font-weight: 500;
   color: var(--text-2);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--line);
   background: rgba(255,255,255,0.015);
   white-space: nowrap;
 }
 tbody td {
-  padding: 12px 14px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
   color: var(--text-1);
 }
 tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover td { background: rgba(255,255,255,0.025); }
-tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
+tbody td.mono, thead th.mono { font-family: var(--mono); font-size: var(--fs-md); }
 .empty {
   padding: 36px 18px;
   text-align: center;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: var(--fs-lg);
 }
 
 /* --- badges --- */
 .badge {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 11px;
-  padding: 3px 9px;
+  font-size: var(--fs-sm);
+  padding: 4px 10px;
   border-radius: 999px;
   border: 1px solid var(--line-strong);
   background: var(--bg-3);
@@ -262,19 +274,19 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
 
 .policy-pill {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 11px; padding: 3px 9px; border-radius: 7px;
+  font-size: var(--fs-sm); padding: 4px 10px; border-radius: 7px;
   border: 1px solid var(--line-strong); font-family: var(--mono);
 }
 .policy-pill.work { color: var(--accent); border-color: transparent; background: var(--accent-dim); }
 .policy-pill.ro   { color: var(--warn);   border-color: transparent; background: var(--warn-dim); }
 .policy-pill.other{ color: var(--text-2); }
 
-.path { color: var(--text-2); font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.path { color: var(--text-2); font-family: var(--mono); font-size: var(--fs-sm); word-break: break-all; }
 
 .footnote {
   margin-top: 28px;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   font-family: var(--mono);
 }
 .notice {
@@ -283,7 +295,7 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
   color: var(--warn);
   padding: 10px 14px;
   border-radius: 10px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   margin-bottom: 14px;
 }
 .banner {
@@ -292,13 +304,13 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
   color: var(--text-2);
   padding: 10px 14px;
   border-radius: 10px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   margin-bottom: 14px;
   font-family: var(--mono);
 }
 .banner.error { color: var(--danger); border-color: transparent; background: var(--danger-dim); }
 .kbd {
-  font-family: var(--mono); font-size: 11px;
+  font-family: var(--mono); font-size: var(--fs-sm);
   padding: 1px 6px; border-radius: 5px;
   background: var(--bg-3); border: 1px solid var(--line-strong);
   color: var(--text-0);
@@ -321,63 +333,140 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
   margin-bottom: 8px; padding-bottom: 6px;
   border-bottom: 1px dashed rgba(167,139,250,.2);
 }
-.recap-header .glyph { font-size: 14px; color: #a78bfa; font-weight: 700; }
+.recap-header .glyph { font-size: var(--fs-md); color: #a78bfa; font-weight: 700; }
 .recap-header .title {
-  color: #ddd6fe; font-size: 11px; font-weight: 700;
+  color: #ddd6fe; font-size: var(--fs-sm); font-weight: 700;
   text-transform: uppercase; letter-spacing: 1px;
 }
 .recap-header .oneline {
-  flex: 1; color: var(--text-0); font-size: 11.5px; font-weight: 500;
+  flex: 1; color: var(--text-0); font-size: var(--fs-sm); font-weight: 500;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .recap .native-recap {
-  color: var(--text-0); font-size: 12px; line-height: 1.55;
+  color: var(--text-0); font-size: var(--fs-md); line-height: 1.55;
   padding: 6px 0 10px;
   border-bottom: 1px dashed rgba(167,139,250,.2);
   margin-bottom: 8px; white-space: pre-wrap; word-break: break-word;
 }
-.recap .native-recap .more { color: var(--text-2); font-size: 10.5px; display: block; margin-top: 2px; }
+.recap .native-recap .more { color: var(--text-2); font-size: var(--fs-xs); display: block; margin-top: 2px; }
 .recap-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; align-items: start; }
 .recap .lbl {
   justify-self: start;
   padding: 2px 8px; border-radius: 10px;
   background: rgba(167,139,250,.25); color: #ddd6fe;
-  font-size: 9.5px; font-weight: 700;
+  font-size: var(--fs-xs); font-weight: 700;
   text-transform: uppercase; letter-spacing: .5px;
   line-height: 1.4; white-space: nowrap;
 }
 .recap .lbl.warn { background: rgba(255,176,102,.25); color: #fde68a; }
 .recap .lbl.pr   { background: rgba(126,182,255,.25); color: #bfdbfe; }
 .recap .val {
-  color: var(--text-0); font-size: 11.5px; line-height: 1.5;
+  color: var(--text-0); font-size: var(--fs-sm); line-height: 1.5;
   word-break: break-word; min-width: 0;
 }
 .recap .val.muted   { color: var(--text-2); }
 .recap .val.pending { color: var(--warn); }
-.recap .val.files   { font-family: var(--mono); font-size: 10.5px; color: #c7d2fe; }
+.recap .val.files   { font-family: var(--mono); font-size: var(--fs-xs); color: #c7d2fe; }
 .recap .val a {
   color: #93c5fd; text-decoration: none;
-  font-family: var(--mono); font-size: 11px;
+  font-family: var(--mono); font-size: var(--fs-sm);
 }
 .recap .val a:hover { text-decoration: underline; }
 .recap .val code {
   background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 4px;
-  font-size: 10px; color: #a78bfa; margin-right: 3px;
+  font-size: var(--fs-xs); color: #a78bfa; margin-right: 3px;
   font-family: var(--mono);
 }
-.recap .val .more { color: var(--text-2); font-size: 10.5px; margin-left: 4px; }
+.recap .val .more { color: var(--text-2); font-size: var(--fs-xs); margin-left: 4px; }
 
 .tag {
-  display: inline-block; padding: 2px 8px; border-radius: 10px;
-  font-size: 10.5px; font-weight: 600; letter-spacing: .3px;
+  display: inline-block; padding: 3px 9px; border-radius: 10px;
+  font-size: var(--fs-xs); font-weight: 600; letter-spacing: .3px;
   text-transform: uppercase;
 }
 .tag.native  { background: rgba(126,182,255,.18); color: #93c5fd; border: 1px solid rgba(126,182,255,.35); }
 .tag.spawned { background: rgba(167,139,250,.18); color: #c4b5fd; border: 1px solid rgba(167,139,250,.35); }
 .tag.hermes  { background: rgba(124,242,195,.18); color: #6ee7b7; border: 1px solid rgba(124,242,195,.35); }
 
-.msg-counts { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+/* Status pill — display_status (active/inactive/done) painted at the top
+   of every session card. Colors mirror the legacy report so the eye
+   already trusts them. The "row-flash" class is briefly toggled by the
+   hermes→spawn jump handler to draw the eye to the target row. */
+.status-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px;
+  font-size: var(--fs-sm); font-weight: 600; font-family: var(--mono);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  border: 1px solid transparent;
+}
+.status-pill.active   { background: var(--accent-dim); color: var(--accent); }
+.status-pill.inactive { background: var(--warn-dim);   color: var(--warn); }
+.status-pill.done     { background: rgba(126,182,255,.13); color: var(--info); }
+.status-pill::before {
+  content: ""; width: 7px; height: 7px; border-radius: 999px;
+  background: currentColor;
+}
+.status-pill.active::before { box-shadow: 0 0 0 3px rgba(124,242,195,0.18); }
+
+tr.row-flash > td {
+  outline: 2px solid var(--warn);
+  outline-offset: -2px;
+  transition: outline-color 0.4s ease-out;
+}
+tr.row-flash.row-flash-fade > td { outline-color: transparent; }
+
+/* Pagination strip — three controls per panel, right-aligned under the
+   table. Page-size selector + "← prev" / "next →" + "page m / n" label. */
+.pagination {
+  display: flex; gap: 12px; align-items: center; justify-content: flex-end;
+  margin-top: 10px; font-size: var(--fs-sm); color: var(--text-2);
+}
+.pagination button {
+  background: var(--bg-1); color: var(--text-0);
+  border: 1px solid var(--line); padding: 6px 12px; border-radius: 8px;
+  font: inherit; cursor: pointer;
+}
+.pagination button[disabled] { opacity: 0.4; cursor: default; }
+.pagination button:not([disabled]):hover { background: var(--bg-2); }
+.pagination .pageinfo { font-family: var(--mono); color: var(--text-1); }
+
+/* Sort affordance on table headers — clickable th gets a faint arrow.
+   The active sort column carries .sort-asc / .sort-desc. */
+thead th.sortable {
+  cursor: pointer; user-select: none;
+}
+thead th.sortable::after {
+  content: " ↕";
+  opacity: 0.35;
+  font-size: var(--fs-xs);
+}
+thead th.sortable.sort-asc::after  { content: " ▲"; opacity: 0.9; color: var(--accent); }
+thead th.sortable.sort-desc::after { content: " ▼"; opacity: 0.9; color: var(--accent); }
+
+/* Tool-call hide toggle. Default state is "hidden" — adding `.show-tools`
+   to <body> re-enables the chip block. The toggle is a single global
+   checkbox in the header tools strip, persisted to localStorage so the
+   user's choice survives reloads. */
+.recap-tools { display: none; }
+body.show-tools .recap-tools { display: block; }
+
+.tools-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--fs-sm); color: var(--text-2);
+  cursor: pointer;
+}
+.tools-toggle input { accent-color: var(--accent); }
+
+.msg-counts { font-family: var(--mono); font-size: var(--fs-sm); color: var(--text-2); }
 .msg-counts .total { color: var(--text-0); }
+.msg-counts.tools { color: var(--text-3); }
+.row-relage { color: var(--text-2); font-family: var(--mono); font-size: var(--fs-xs); }
+.row-relage.recent { color: var(--accent); }
+.ai-title {
+  font-weight: 600; color: var(--text-0);
+  font-size: var(--fs-md); line-height: 1.35;
+  margin-top: 2px;
+}
 .root-card {
   background: var(--bg-1);
   border: 1px solid var(--line);
@@ -385,7 +474,7 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
   padding: 12px 14px;
 }
 .root-card .role {
-  font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
+  font-size: var(--fs-sm); letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--text-3);
 }
 .root-card .root-path {
@@ -414,6 +503,10 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <div>런타임 <span class="mono" id="m-runtime">—</span></div>
       <div class="refresh">생성 <span class="mono" id="m-generated">—</span></div>
       <div>모드 <span class="mono" id="m-live">—</span></div>
+      <label class="tools-toggle" title="툴 호출(Bash/Edit/…) 칩 표시 토글">
+        <input type="checkbox" id="opt-show-tools" />
+        도구 호출 보기
+      </label>
     </div>
   </header>
 
@@ -508,15 +601,20 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <table>
         <thead>
           <tr>
-            <th>session id</th><th>profile</th>
-            <th>첫 메시지</th><th>turns</th><th>모델</th>
+            <th class="sortable" data-sort-key="hermes_session_id">session id</th>
+            <th class="sortable" data-sort-key="profile_name">profile</th>
+            <th>첫 메시지</th>
+            <th class="sortable" data-sort-key="turn_count">turns</th>
+            <th>모델</th>
             <th>spawned claude</th>
-            <th>transcript</th><th>mtime</th>
+            <th>transcript</th>
+            <th class="sortable" data-sort-key="transcript_mtime">mtime</th>
           </tr>
         </thead>
         <tbody id="t-hermes-agent"></tbody>
       </table>
     </div>
+    <div class="pagination" data-pager="hermes-agent"></div>
   </section>
 
   <!-- hermes 스폰 claude 세션 패널 (a-ok: prefix 가 붙은 ledger 행만) -->
@@ -539,10 +637,9 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <div class="panel-tools">
         <select class="select" data-filter-status="hermes">
           <option value="">모든 상태</option>
-          <option>active</option>
-          <option>done</option>
-          <option>failed</option>
-          <option>abandoned</option>
+          <option value="active">🟢 active</option>
+          <option value="inactive">🟡 inactive</option>
+          <option value="done">🔵 done</option>
         </select>
         <select class="select" data-filter-mode="hermes">
           <option value="">모든 dispatch</option>
@@ -558,14 +655,20 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <table>
         <thead>
           <tr>
-            <th>#</th><th>이름</th><th>마지막 dispatch</th>
-            <th>runs (-p / total)</th><th>상태</th>
-            <th>프로젝트</th><th>UUID</th><th>last used</th>
+            <th class="sortable" data-sort-key="id">#</th>
+            <th class="sortable" data-sort-key="name">이름</th>
+            <th>마지막 dispatch</th>
+            <th class="sortable" data-sort-key="run_count">runs (-p / total)</th>
+            <th class="sortable" data-sort-key="display_status">상태</th>
+            <th class="sortable" data-sort-key="project_name">프로젝트</th>
+            <th>UUID</th>
+            <th class="sortable" data-sort-key="last_used_at">last used</th>
           </tr>
         </thead>
         <tbody id="t-hermes"></tbody>
       </table>
     </div>
+    <div class="pagination" data-pager="hermes"></div>
   </section>
 
   <!-- Native 세션 패널 (scv- prefix 가 없는 ledger 행) -->
@@ -588,10 +691,9 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
         </select>
         <select class="select" data-filter-status="native">
           <option value="">모든 상태</option>
-          <option>active</option>
-          <option>done</option>
-          <option>failed</option>
-          <option>abandoned</option>
+          <option value="active">🟢 active</option>
+          <option value="inactive">🟡 inactive</option>
+          <option value="done">🔵 done</option>
         </select>
         <input class="search" type="search"
                placeholder="이름/UUID/프로젝트/brief 검색"
@@ -603,14 +705,21 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <table>
         <thead>
           <tr>
-            <th>#</th><th>이름</th><th>분류</th><th>마지막 dispatch</th>
-            <th>runs (-p / total)</th><th>상태</th>
-            <th>프로젝트</th><th>UUID</th><th>last used</th>
+            <th class="sortable" data-sort-key="id">#</th>
+            <th class="sortable" data-sort-key="name">이름</th>
+            <th>분류</th>
+            <th>마지막 dispatch</th>
+            <th class="sortable" data-sort-key="run_count">runs (-p / total)</th>
+            <th class="sortable" data-sort-key="display_status">상태</th>
+            <th class="sortable" data-sort-key="project_name">프로젝트</th>
+            <th>UUID</th>
+            <th class="sortable" data-sort-key="last_used_at">last used</th>
           </tr>
         </thead>
         <tbody id="t-native"></tbody>
       </table>
     </div>
+    <div class="pagination" data-pager="native"></div>
     <div class="footnote">
       덮어쓰기: <span class="kbd">WORKER_CONTROL_CLAUDE_PROJECTS_DIR</span>
     </div>
@@ -673,6 +782,33 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
 (function() {
   const INLINE_SENTINEL = "__INLINE_DATA__";
   const REFRESH_MS = 5000;
+
+  // ── persistent UI state — page size + sort + tools-toggle ─────────────
+  // Stored in localStorage so the user's choice survives reloads and the
+  // 5-second snapshot poll doesn't reset what they're looking at.
+  const LS_PAGE_SIZE   = "dashboard.pageSize";
+  const LS_SHOW_TOOLS  = "dashboard.showTools";
+  const PAGE_SIZE_OPTS = [25, 50, 100, 200];
+  function readPageSize() {
+    const raw = parseInt(localStorage.getItem(LS_PAGE_SIZE) || "", 10);
+    return PAGE_SIZE_OPTS.indexOf(raw) >= 0 ? raw : 50;
+  }
+  let pageSize = readPageSize();
+  // Per-panel pagination + sort state — current page, sort column, dir.
+  const panelState = {
+    "hermes":       { page: 1, sortKey: "last_used_at",  sortDir: "desc" },
+    "native":       { page: 1, sortKey: "last_used_at",  sortDir: "desc" },
+    "hermes-agent": { page: 1, sortKey: "transcript_mtime", sortDir: "desc" }
+  };
+  function resetPage(panel) {
+    if (panelState[panel]) panelState[panel].page = 1;
+  }
+
+  // Apply the persisted tools-visibility class as early as possible so the
+  // first paint doesn't flash the tool chips before the toggle wires up.
+  if (localStorage.getItem(LS_SHOW_TOOLS) === "1") {
+    document.body.classList.add("show-tools");
+  }
 
   function parseInline() {
     const raw = document.getElementById("dashboard-data").textContent;
@@ -968,6 +1104,12 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
         ? "<span class='more'>+" + (files.length - 5) + " more</span>" : "";
       push("files", "", shown + " " + more, "files");
     }
+    // Tools chip block — hidden by default, revealed by `.show-tools` on
+    // <body>. We still render it (so the toggle has something to flip on)
+    // but the actual command/argument strings stay out of the eyeline
+    // until the user opts in. A compact "🔧 tools×N" counter lives in
+    // parityMetaHtml so the count is always visible.
+    let toolsBlock = "";
     if (tools.length) {
       const html = tools.slice(0, 5).map(function(t) {
         const snip = t.snippet
@@ -975,12 +1117,14 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
              + (t.snippet.length > 60 ? "…" : ""))
           : "";
         return "<code>" + escapeHtml(t.name) + "</code>"
-             + "<span style='color:var(--text-3);font-size:10px'>"
+             + "<span style='color:var(--text-3);font-size:var(--fs-xs)'>"
              + snip + "</span>";
       }).join(" ");
-      push("tools", "", html);
+      toolsBlock = "<div class='recap-tools' style='margin-top:6px'>"
+        + "<span class='lbl'>tools</span> "
+        + "<span class='val'>" + html + "</span></div>";
     }
-    if (!cells.length && !nativeRecaps.length) return "";
+    if (!cells.length && !nativeRecaps.length && !toolsBlock) return "";
 
     let oneliner = "";
     let nativeBlock = "";
@@ -1023,26 +1167,71 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       + "</div>"
       + nativeBlock
       + (cells.length ? "<div class='recap-grid'>" + cells.join("") + "</div>" : "")
+      + toolsBlock
       + "</div>";
   }
 
-  // Extra context line (msg counts + git branch + claude version) — slides
-  // above the recap card. Kept tight so it doesn't push the table layout.
+  // Extra context line (msg counts + git branch + claude version + tools
+  // counter + relative time) — slides above the recap card. The tools
+  // counter is always shown (just the number, no command snippets) so
+  // the user can see how busy the session has been without needing to
+  // toggle the per-row tools chip block.
+  //
+  // Each row's "last activity" gets a relative-time chip (e.g. "활성중"
+  // / "15m 전" / "3시간 전") plus the absolute timestamp as a tooltip so
+  // the user can hover for the exact value when the relative form is
+  // ambiguous.
   function parityMetaHtml(s) {
     if (!s) return "";
     const parts = [];
     const total = (s.msg_user || 0) + (s.msg_assistant || 0);
-    if (total || s.msg_tool) {
+    if (total) {
       parts.push("<span class='msg-counts'>"
         + "<span class='total'>" + total + "</span>"
         + " msgs (u" + (s.msg_user || 0)
-        + "/a" + (s.msg_assistant || 0)
-        + "/t" + (s.msg_tool || 0) + ")</span>");
+        + "/a" + (s.msg_assistant || 0) + ")</span>");
+    }
+    if (s.msg_tool) {
+      // Tools counter is intentionally muted (no command snippets) — the
+      // full chip block lives under the recap-tools toggle.
+      parts.push("<span class='msg-counts tools'>🔧 tools×" + (s.msg_tool || 0) + "</span>");
     }
     if (s.git_branch)     parts.push("<span class='msg-counts'>⎇ " + escapeHtml(s.git_branch) + "</span>");
     if (s.claude_version) parts.push("<span class='msg-counts'>v" + escapeHtml(s.claude_version) + "</span>");
+    const tsRaw = s.last_used_at || s.transcript_mtime || s.ended_at;
+    const rel = relativeAge(tsRaw);
+    if (rel) {
+      const cls = rel.recent ? "row-relage recent" : "row-relage";
+      parts.push("<span class='" + cls + "' title='"
+        + escapeHtml(tsRaw || "") + "'>" + escapeHtml(rel.text) + "</span>");
+    }
     if (!parts.length) return "";
-    return "<div style='margin-top:4px;display:flex;gap:10px;flex-wrap:wrap'>" + parts.join("") + "</div>";
+    return "<div style='margin-top:4px;display:flex;gap:10px;flex-wrap:wrap;align-items:center'>"
+      + parts.join("") + "</div>";
+  }
+
+  // Parse an ISO-8601 string and return a short Korean relative-time
+  // label. Anything within the active window (≤ 2h) gets a "recent"
+  // flag so the caller can paint it green; older rows fall back to
+  // minute/hour/day deltas. Returns null for unparseable inputs so the
+  // caller can skip the chip rather than show "—".
+  function relativeAge(iso) {
+    if (!iso) return null;
+    let s = String(iso).trim();
+    if (!s) return null;
+    if (s.endsWith("Z")) s = s.slice(0, -1) + "+00:00";
+    const t = Date.parse(s);
+    if (isNaN(t)) return null;
+    const delta = Date.now() - t;
+    const secs = Math.max(0, Math.floor(delta / 1000));
+    if (secs < 60)         return { text: "방금", recent: true };
+    const mins = Math.floor(secs / 60);
+    if (mins < 60)         return { text: mins + "분 전", recent: mins <= 120 };
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24)          return { text: hrs + "시간 전",  recent: hrs * 60 <= 120 };
+    const days = Math.floor(hrs / 24);
+    if (days < 30)         return { text: days + "일 전",   recent: false };
+    return { text: ">30일 전", recent: false };
   }
 
   // Make the legacy-report parity rich text searchable in the ledger filter,
@@ -1088,15 +1277,20 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     const txt = (mode === "print") ? "-p (print)" : "interactive";
     return "<span class='badge " + cls + " plain'>" + escapeHtml(txt) + "</span>";
   }
-  function ledgerStatusBadge(st) {
-    const m = {
-      "active":    "accent",
-      "done":      "info",
-      "failed":    "danger",
-      "abandoned": "warn"
-    };
-    return "<span class='badge " + (m[st] || "muted") + " plain'>"
-           + escapeHtml(st || "—") + "</span>";
+  // display_status (active/inactive/done) — the rule lives server-side in
+  // session_view.py so every consumer (FE pill, Slack heartbeat) agrees.
+  // We fall back to the raw ledger status only when display_status is
+  // missing (e.g. legacy snapshot from before this PR).
+  function ledgerStatusPill(s) {
+    const ds = (s.display_status || "").toLowerCase();
+    const cls = (ds === "active" || ds === "inactive" || ds === "done")
+      ? ds : "inactive";
+    const tip = s.last_used_at
+      ? ("last used: " + s.last_used_at + (s.ended_at ? " · ended: " + s.ended_at : ""))
+      : (s.ended_at ? "ended: " + s.ended_at : "");
+    const txt = ds || s.status || "—";
+    return "<span class='status-pill " + cls + "' title='"
+      + escapeHtml(tip) + "'>" + escapeHtml(txt) + "</span>";
   }
   function ledgerRowHtml(s, opts) {
     const showClass = !!(opts && opts.showClass);
@@ -1109,22 +1303,36 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     const claudeName = (s.claude_name && s.claude_name !== s.name)
       ? "<div class='path'>claude /name: " + escapeHtml(s.claude_name) + "</div>"
       : "";
+    // ai_title (claude-generated short caption) → big-ish line; falls
+    // back to a last_user_text snippet so the row always has a hook the
+    // user can scan, not just an opaque slug.
+    let titleLine = "";
+    if (s.ai_title) {
+      titleLine = "<div class='ai-title'>" + escapeHtml(s.ai_title) + "</div>";
+    } else if (s.last_user_text) {
+      const t = s.last_user_text.slice(0, 120);
+      titleLine = "<div class='ai-title'>" + escapeHtml(t)
+        + (s.last_user_text.length > 120 ? "…" : "") + "</div>";
+    }
     const briefDiv = s.brief
       ? "<div class='path'>" + escapeHtml((s.brief || "").slice(0, 120)) + "</div>"
       : "";
     const recap = recapCardHtml(s);
     const meta  = parityMetaHtml(s);
+    // The row carries `data-row-uuid` so the hermes→spawn jump handler
+    // can scrollIntoView + flash-highlight without re-querying by index.
+    const rowUuid = s.uuid ? (" data-row-uuid='" + escapeHtml(s.uuid) + "'") : "";
     return ""
-      + "<tr>"
+      + "<tr" + rowUuid + ">"
       +   "<td class='mono'>" + s.id + "</td>"
       +   "<td><strong>" + escapeHtml(s.name || "—") + "</strong>"
-      +       claudeName + briefDiv + meta + recap + "</td>"
+      +       claudeName + titleLine + briefDiv + meta + recap + "</td>"
       +   (showClass ? "<td>" + ledgerClassBadge(s) + "</td>" : "")
       +   "<td>" + ledgerModeBadge(s.dispatch_mode)
       +     "<div class='path'>" + escapeHtml(lastRunTime) + "</div>"
       +     lastRun + "</td>"
       +   "<td class='mono'>" + runCounts + "</td>"
-      +   "<td>" + ledgerStatusBadge(s.status) + "</td>"
+      +   "<td>" + ledgerStatusPill(s) + "</td>"
       +   "<td>"
       +     "<div>" + escapeHtml(s.project_name || "—") + "</div>"
       +     (s.project_path
@@ -1143,30 +1351,102 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     return parityHaystack(s).indexOf(ft) >= 0;
   }
 
+  // ── shared sort + paginate helpers ────────────────────────────────────
+  // The three session tables (hermes / native / hermes-agent) all want
+  // identical sort+paginate semantics, so we centralize:
+  //   sortRowsBy(rows, key, dir)  — null/undefined go to the end
+  //   paginate(rows, panel)       — slices to current page, clamps page
+  //   renderPager(rows, panel)    — paints the pagination strip
+  function sortRowsBy(rows, key, dir) {
+    if (!key) return rows;
+    const mult = dir === "asc" ? 1 : -1;
+    const cmp = function(a, b) {
+      let av = a[key], bv = b[key];
+      const aMissing = (av === null || av === undefined || av === "");
+      const bMissing = (bv === null || bv === undefined || bv === "");
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;        // missing values always last
+      if (bMissing) return -1;
+      if (typeof av === "number" && typeof bv === "number") return (av - bv) * mult;
+      av = String(av); bv = String(bv);
+      return av.localeCompare(bv) * mult;
+    };
+    return rows.slice().sort(cmp);
+  }
+  function paginate(rows, panel) {
+    const st = panelState[panel];
+    if (!st) return { rows: rows, totalPages: 1, page: 1 };
+    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    if (st.page > totalPages) st.page = totalPages;
+    if (st.page < 1) st.page = 1;
+    const start = (st.page - 1) * pageSize;
+    return {
+      rows: rows.slice(start, start + pageSize),
+      totalPages: totalPages,
+      page: st.page,
+      total: rows.length
+    };
+  }
+  function renderPager(info, panel) {
+    const el = document.querySelector("[data-pager='" + panel + "']");
+    if (!el) return;
+    if (!info.total) { el.innerHTML = ""; return; }
+    const prevDis = info.page <= 1 ? " disabled" : "";
+    const nextDis = info.page >= info.totalPages ? " disabled" : "";
+    const sizeOpts = PAGE_SIZE_OPTS.map(function(n) {
+      return "<option value='" + n + "'" + (n === pageSize ? " selected" : "") + ">"
+        + n + "/페이지</option>";
+    }).join("");
+    el.innerHTML =
+      "<span class='pageinfo'>" + info.total + "건</span>"
+      + "<select class='select' data-page-size>" + sizeOpts + "</select>"
+      + "<button type='button' data-page-prev" + prevDis + ">← 이전</button>"
+      + "<span class='pageinfo'>" + info.page + " / " + info.totalPages + "</span>"
+      + "<button type='button' data-page-next" + nextDis + ">다음 →</button>";
+  }
+  // Reflect the active sort column on its <th> so the user sees an
+  // arrow ▲/▼ for whichever column is driving the order.
+  function paintSortHeaders(panelId, sortKey, sortDir) {
+    const root = document.getElementById(panelId);
+    if (!root) return;
+    root.querySelectorAll("th.sortable").forEach(function(th) {
+      th.classList.remove("sort-asc", "sort-desc");
+      if (th.dataset.sortKey === sortKey) {
+        th.classList.add(sortDir === "asc" ? "sort-asc" : "sort-desc");
+      }
+    });
+  }
+
   function renderHermes(filterText, statusFilter, modeFilter) {
     if (!data) return;
     const ft = (filterText || "").toLowerCase();
     const sf = (statusFilter || "").trim();
     const mf = (modeFilter || "").trim();
-    const rows = (data.hermes_sessions || []).filter(function(s) {
-      if (sf && s.status !== sf) return false;
+    const rowsAll = (data.hermes_sessions || []).filter(function(s) {
+      if (sf && (s.display_status || s.status) !== sf) return false;
       if (mf && s.dispatch_mode !== mf) return false;
       if (!ft) return true;
       return filterLedgerRow(s, ft);
     });
     const tbody = document.getElementById("t-hermes");
-    if (!rows.length) {
+    if (!rowsAll.length) {
       const total = (data.hermes_sessions || []).length;
       const msg = total === 0
         ? "scv- prefix 가 붙은 세션이 없습니다. "
           + "scripts/projects.py 의 _run_name() 이 새 dispatch 부터 prefix 를 붙입니다."
         : "필터에 일치하는 세션이 없습니다.";
       tbody.innerHTML = emptyRow(8, msg);
+      renderPager({ total: 0 }, "hermes");
       return;
     }
-    tbody.innerHTML = rows.map(function(s) {
+    const st = panelState["hermes"];
+    const sorted = sortRowsBy(rowsAll, st.sortKey, st.sortDir);
+    const page = paginate(sorted, "hermes");
+    tbody.innerHTML = page.rows.map(function(s) {
       return ledgerRowHtml(s, { showClass: false });
     }).join("");
+    renderPager(page, "hermes");
+    paintSortHeaders("p-hermes", st.sortKey, st.sortDir);
   }
 
   function renderNative(filterText, classFilter, statusFilter) {
@@ -1183,29 +1463,35 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     }
     setText("native-root", data.native_root || "—");
 
-    const rows = (data.native_sessions || []).filter(function(s) {
+    const rowsAll = (data.native_sessions || []).filter(function(s) {
       if (cf && s.classification !== cf) return false;
-      if (sf && s.status !== sf) return false;
+      if (sf && (s.display_status || s.status) !== sf) return false;
       if (!ft) return true;
       return filterLedgerRow(s, ft);
     });
     const tbody = document.getElementById("t-native");
-    if (!rows.length) {
+    if (!rowsAll.length) {
       tbody.innerHTML = emptyRow(9,
         "scv- prefix 가 없는 세션이 없습니다. "
         + "(scripts/projects.py session sync-native --auto-register-projects 로 임포트 가능)");
+      renderPager({ total: 0 }, "native");
       return;
     }
-    tbody.innerHTML = rows.map(function(s) {
+    const st = panelState["native"];
+    const sorted = sortRowsBy(rowsAll, st.sortKey, st.sortDir);
+    const page = paginate(sorted, "native");
+    tbody.innerHTML = page.rows.map(function(s) {
       return ledgerRowHtml(s, { showClass: true });
     }).join("");
+    renderPager(page, "native");
+    paintSortHeaders("p-native", st.sortKey, st.sortDir);
   }
 
   function renderHermesAgent(filterText, spawnFilter) {
     if (!data) return;
     const ft = (filterText || "").toLowerCase();
     const sf = (spawnFilter || "").trim();
-    const rows = (data.hermes_agent_sessions || []).filter(function(r) {
+    const rowsAll = (data.hermes_agent_sessions || []).filter(function(r) {
       if (sf === "with_spawn" && !r.spawned_count) return false;
       if (sf === "no_spawn"   && r.spawned_count)  return false;
       if (!ft) return true;
@@ -1220,10 +1506,11 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       return parityHaystack(r).indexOf(ft) >= 0;
     });
     const tbody = document.getElementById("t-hermes-agent");
-    if (!rows.length) {
+    if (!rowsAll.length) {
       tbody.innerHTML = emptyRow(8,
         "hermes 세션이 DB 에 없습니다. `workerctl sessions sync-hermes` 로 동기화하거나, "
         + "BFF 의 60s 주기 sync 워커가 다음 사이클에 채우길 기다리세요.");
+      renderPager({ total: 0 }, "hermes-agent");
       return;
     }
     function viaBadge(v) {
@@ -1267,7 +1554,10 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       }).join(" ");
       return chips;
     }
-    tbody.innerHTML = rows.map(function(r) {
+    const st = panelState["hermes-agent"];
+    const sorted = sortRowsBy(rowsAll, st.sortKey, st.sortDir);
+    const page = paginate(sorted, "hermes-agent");
+    tbody.innerHTML = page.rows.map(function(r) {
       const firstMsg = r.first_message
         ? "<div class='path'>" + escapeHtml((r.first_message || "").slice(0, 200)) + "</div>"
         : "<span class='path'>—</span>";
@@ -1292,6 +1582,8 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
         +   "<td class='mono'>" + escapeHtml(r.transcript_mtime || r.ended_at || "—") + "</td>"
         + "</tr>";
     }).join("");
+    renderPager(page, "hermes-agent");
+    paintSortHeaders("p-hermes-agent", st.sortKey, st.sortDir);
   }
 
   function renderProjects(filterText, roleFilter, gitFilter) {
@@ -1361,9 +1653,14 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       hermesMode   ? hermesMode.value   : ""
     );
   }
-  hermesSearch && hermesSearch.addEventListener("input",  refreshHermes);
-  hermesStatus && hermesStatus.addEventListener("change", refreshHermes);
-  hermesMode   && hermesMode.addEventListener("change",   refreshHermes);
+  // Filter changes reset to page 1 — otherwise an empty page deep into the
+  // unfiltered set would show "no rows" until the user clicked back.
+  function onFilterChange(panel, fn) {
+    return function() { resetPage(panel); fn(); };
+  }
+  hermesSearch && hermesSearch.addEventListener("input",  onFilterChange("hermes", refreshHermes));
+  hermesStatus && hermesStatus.addEventListener("change", onFilterChange("hermes", refreshHermes));
+  hermesMode   && hermesMode.addEventListener("change",   onFilterChange("hermes", refreshHermes));
 
   const hermesAgentSearch = document.querySelector("[data-filter='hermes-agent']");
   const hermesAgentSpawn  = document.querySelector("[data-filter-spawn='hermes-agent']");
@@ -1373,29 +1670,70 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       hermesAgentSpawn  ? hermesAgentSpawn.value  : ""
     );
   }
-  hermesAgentSearch && hermesAgentSearch.addEventListener("input",  refreshHermesAgent);
-  hermesAgentSpawn  && hermesAgentSpawn.addEventListener("change",  refreshHermesAgent);
+  hermesAgentSearch && hermesAgentSearch.addEventListener("input",
+    onFilterChange("hermes-agent", refreshHermesAgent));
+  hermesAgentSpawn  && hermesAgentSpawn.addEventListener("change",
+    onFilterChange("hermes-agent", refreshHermesAgent));
 
-  // Click on a spawn chip in the Hermes 세션 tab → jump to Hermes 스폰 tab
-  // (or Native if the row is non-spawn) and pre-fill the search filter with
-  // the claude uuid 8-char prefix so the right row lands at the top.
-  document.addEventListener("click", function(ev) {
-    const chip = ev.target && ev.target.closest && ev.target.closest(".spawn-chip");
-    if (!chip) return;
-    ev.preventDefault();
-    const uuid = chip.getAttribute("data-spawn-uuid") || "";
+  // ── hermes→spawn 바로가기 ─────────────────────────────────────────────
+  // Click on a spawn chip in the Hermes 세션 tab → switch to the Hermes 스폰
+  // tab (or Native if the row is non-spawn), find the right page, scroll
+  // the matching row into view, and flash a yellow outline so the eye
+  // catches it.
+  //
+  // The chip also handles Enter/Space when focused for keyboard a11y —
+  // <a> is in the tab order by default and `tabindex` is preserved by
+  // browsers as long as we don't drop the href.
+  function _jumpToSpawnRow(uuid) {
+    if (!uuid) return;
     const u8 = uuid.slice(0, 8);
-    if (!u8) return;
-    // Decide target tab: scan both lists.
-    const inSpawn  = (data.hermes_sessions || []).some(function(s) { return s.uuid === uuid; });
+    // Decide the target tab by checking which list contains the uuid.
+    const inSpawn = (data.hermes_sessions || []).some(function(s) {
+      return (s.uuid || "").toLowerCase() === uuid.toLowerCase();
+    });
     const targetTab = inSpawn ? "hermes" : "native";
     const tabBtn = document.querySelector(".tab[data-target='" + targetTab + "']");
     if (tabBtn) tabBtn.click();
     if (targetTab === "hermes") {
-      if (hermesSearch) { hermesSearch.value = u8; refreshHermes(); }
-    } else {
-      if (nativeSearch) { nativeSearch.value = u8; refreshNative(); }
+      if (hermesSearch) hermesSearch.value = u8;
+    } else if (nativeSearch) {
+      nativeSearch.value = u8;
     }
+    // Reset pagination on the target panel so the filtered match is on
+    // page 1 — otherwise we'd render the first page of the filtered set
+    // and the scroll target would be on a different page.
+    resetPage(targetTab);
+    if (targetTab === "hermes") refreshHermes(); else refreshNative();
+    // Defer the scroll-into-view + flash to next frame so the DOM has
+    // the freshly-rendered rows.
+    requestAnimationFrame(function() {
+      const row = document.querySelector(
+        "#p-" + targetTab + " tr[data-row-uuid='" + uuid + "']"
+      );
+      if (!row) return;
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.remove("row-flash", "row-flash-fade");
+      void row.offsetWidth;            // restart CSS transition
+      row.classList.add("row-flash");
+      setTimeout(function() { row.classList.add("row-flash-fade"); }, 200);
+      setTimeout(function() {
+        row.classList.remove("row-flash", "row-flash-fade");
+      }, 1800);
+    });
+  }
+  document.addEventListener("click", function(ev) {
+    const chip = ev.target && ev.target.closest && ev.target.closest(".spawn-chip");
+    if (!chip) return;
+    ev.preventDefault();
+    _jumpToSpawnRow(chip.getAttribute("data-spawn-uuid") || "");
+  });
+  // Keyboard a11y — Enter/Space on a focused chip is treated like a click.
+  document.addEventListener("keydown", function(ev) {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    const chip = ev.target && ev.target.closest && ev.target.closest(".spawn-chip");
+    if (!chip) return;
+    ev.preventDefault();
+    _jumpToSpawnRow(chip.getAttribute("data-spawn-uuid") || "");
   });
 
   const nativeSearch = document.querySelector("[data-filter='native']");
@@ -1408,9 +1746,9 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       nativeStatus ? nativeStatus.value : ""
     );
   }
-  nativeSearch && nativeSearch.addEventListener("input",  refreshNative);
-  nativeClass  && nativeClass.addEventListener("change", refreshNative);
-  nativeStatus && nativeStatus.addEventListener("change", refreshNative);
+  nativeSearch && nativeSearch.addEventListener("input",  onFilterChange("native", refreshNative));
+  nativeClass  && nativeClass.addEventListener("change", onFilterChange("native", refreshNative));
+  nativeStatus && nativeStatus.addEventListener("change", onFilterChange("native", refreshNative));
 
   const projSearch = document.querySelector("[data-filter='projects']");
   const projRole   = document.querySelector("[data-filter-role='projects']");
@@ -1432,6 +1770,88 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       projRole ? projRole.value : "",
       projGit ? projGit.value : ""
     );
+  }
+
+  // ── pagination strip wiring (delegated; the strip is re-rendered on
+  // every paint, so we attach a single body-level listener). Page-size
+  // selector is persisted to localStorage so a 200-row preference sticks
+  // across polls and reloads.
+  function _panelOfTarget(el) {
+    const root = el && el.closest && el.closest("[data-pager]");
+    return root ? root.getAttribute("data-pager") : null;
+  }
+  function _refreshPanel(panel) {
+    if (panel === "hermes")        refreshHermes();
+    else if (panel === "native")   refreshNative();
+    else if (panel === "hermes-agent") refreshHermesAgent();
+  }
+  document.addEventListener("click", function(ev) {
+    const t = ev.target;
+    if (!t || !t.matches) return;
+    const panel = _panelOfTarget(t);
+    if (!panel) return;
+    if (t.matches("[data-page-prev]")) {
+      panelState[panel].page = Math.max(1, panelState[panel].page - 1);
+      _refreshPanel(panel);
+    } else if (t.matches("[data-page-next]")) {
+      panelState[panel].page = panelState[panel].page + 1;
+      _refreshPanel(panel);
+    }
+  });
+  document.addEventListener("change", function(ev) {
+    const t = ev.target;
+    if (!t || !t.matches) return;
+    if (t.matches("[data-page-size]")) {
+      const n = parseInt(t.value, 10);
+      if (PAGE_SIZE_OPTS.indexOf(n) >= 0) {
+        pageSize = n;
+        localStorage.setItem(LS_PAGE_SIZE, String(n));
+        // Reset every panel to page 1 — current page numbers were valid
+        // for the old size and don't carry over.
+        Object.keys(panelState).forEach(resetPage);
+        repaintTables();
+      }
+    }
+  });
+
+  // Sort headers — clicking toggles asc/desc on the same column,
+  // switches to desc on a new column. Resets to page 1 so the new top
+  // row is visible.
+  document.addEventListener("click", function(ev) {
+    const th = ev.target && ev.target.closest && ev.target.closest("th.sortable");
+    if (!th) return;
+    const panelEl = th.closest(".panel");
+    if (!panelEl) return;
+    const panel = panelEl.id.replace(/^p-/, "");
+    const st = panelState[panel];
+    if (!st) return;
+    const key = th.dataset.sortKey;
+    if (!key) return;
+    if (st.sortKey === key) {
+      st.sortDir = (st.sortDir === "asc") ? "desc" : "asc";
+    } else {
+      st.sortKey = key;
+      st.sortDir = "desc";
+    }
+    resetPage(panel);
+    _refreshPanel(panel);
+  });
+
+  // Tools-visibility toggle — single global checkbox in the header meta
+  // strip, persists to localStorage. CSS does the actual hide/show via
+  // `body.show-tools .recap-tools`.
+  const toolsToggle = document.getElementById("opt-show-tools");
+  if (toolsToggle) {
+    toolsToggle.checked = document.body.classList.contains("show-tools");
+    toolsToggle.addEventListener("change", function() {
+      if (toolsToggle.checked) {
+        document.body.classList.add("show-tools");
+        localStorage.setItem(LS_SHOW_TOOLS, "1");
+      } else {
+        document.body.classList.remove("show-tools");
+        localStorage.setItem(LS_SHOW_TOOLS, "0");
+      }
+    });
   }
   function repaintAll() {
     paintMeta();

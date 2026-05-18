@@ -177,6 +177,9 @@ def _session_view_to_dict(v: SessionView) -> dict[str, Any]:
         "uuid": v.uuid,
         "name": v.name,
         "status": v.status,
+        # Derived bucket: active/inactive/done. Computed in session_view so
+        # every consumer (FE pill, Slack heartbeat) agrees on the rule.
+        "display_status": v.display_status,
         "origin": v.origin,
         "classification": v.classification,
         "spawn_reason": v.spawn_reason,
