@@ -54,16 +54,23 @@ def test_ingest_all_populates_canonical_db(tmp_path: Path, monkeypatch) -> None:
     assert stats["claude_scanned"] == 1
     assert stats["claude_updated"] == 1
 
-    # hermes_agent_sessions row now exists
+    # Claude rows live in claude_session_parity post-split — NOT in
+    # hermes_agent_sessions (which is reserved for Hermes-profile sources).
     row = conn.execute(
         "SELECT msg_user, msg_assistant, msg_tool, ai_title, git_branch, "
         "claude_version, is_spawned, effective_status "
-        "FROM hermes_agent_sessions WHERE hermes_session_id=?",
+        "FROM claude_session_parity WHERE session_uuid=?",
         (jl.stem,)
     ).fetchone()
     assert row == (1, 1, 1, None, "feat/x", "2.1.140", 0, "active")
 
-    # Child tables populated
+    # And the Hermes-only table must be empty for this native claude row.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM hermes_agent_sessions WHERE hermes_session_id=?",
+        (jl.stem,)
+    ).fetchone()[0] == 0
+
+    # Child tables populated (shared between both sources).
     assert conn.execute(
         "SELECT COUNT(*) FROM session_pr_links WHERE session_uuid=?",
         (jl.stem,)

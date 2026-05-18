@@ -1,15 +1,19 @@
 """Ingestion driver — scan claude+hermes transcripts and write parity rows.
 
 Called every heartbeat tick. Cheap: skips transcripts whose mtime hasn't
-moved since the last sync (the `transcript_mtime` column on
-`hermes_agent_sessions` is the watermark).
+moved since the last sync (the ``transcript_mtime`` column on the target
+parity table is the watermark).
 
-Two scan passes:
+Two scan passes, two destination tables:
 1. Claude jsonl under ``~/.claude/projects/<encoded>/<uuid>.jsonl``
+   → ``claude_session_parity`` (PK ``session_uuid``).
 2. Hermes session_*.json under ``~/AppData/Local/hermes/profiles/*/sessions``
+   → ``hermes_agent_sessions`` (PK ``hermes_session_id``).
 
-The parser is shared (`legacy_parity_parser`). Both paths feed the same
-hermes_agent_sessions row + child tables.
+The parser is shared (``legacy_parity_parser``); only the row-upsert
+target differs by source. Child tables (PR links, files, tools, recaps,
+queue) are shared — they're keyed by ``session_uuid`` and the parser
+produces identical-shaped child rows for both sources.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from .legacy_parity_schema import (
     CHILD_TABLES,
     apply_legacy_parity_schema,
     replace_child_rows,
+    upsert_claude_parity_row,
     upsert_session_row,
 )
 
@@ -60,8 +65,8 @@ def _worker_name_lookup(conn: sqlite3.Connection) -> dict[str, str]:
         return {}
 
 
-def _existing_watermarks(conn: sqlite3.Connection) -> dict[str, str]:
-    """hermes_session_id → previously-stored transcript_mtime.
+def _existing_hermes_watermarks(conn: sqlite3.Connection) -> dict[str, str]:
+    """hermes_session_id → previously-stored transcript_mtime (Hermes side).
 
     Works regardless of whether the caller set conn.row_factory — we read
     by positional index so we never depend on Row column access.
@@ -77,9 +82,35 @@ def _existing_watermarks(conn: sqlite3.Connection) -> dict[str, str]:
         return {}
 
 
-def _commit_parsed(conn: sqlite3.Connection, parsed: dict[str, Any]) -> None:
-    """Apply one parser result to the DB (row UPSERT + child DELETE+INSERT)."""
-    upsert_session_row(conn, parsed["row"])
+def _existing_claude_watermarks(conn: sqlite3.Connection) -> dict[str, str]:
+    """session_uuid → previously-stored transcript_mtime (Claude side)."""
+    try:
+        return {
+            r[0]: (r[1] or "")
+            for r in conn.execute(
+                "SELECT session_uuid, transcript_mtime FROM claude_session_parity"
+            )
+        }
+    except sqlite3.OperationalError:
+        return {}
+
+
+def _commit_parsed(
+    conn: sqlite3.Connection,
+    parsed: dict[str, Any],
+    *,
+    target: str = "hermes",
+) -> None:
+    """Apply one parser result to the DB (row UPSERT + child DELETE+INSERT).
+
+    ``target='hermes'`` writes the parent row to ``hermes_agent_sessions``;
+    ``target='claude'`` writes it to ``claude_session_parity``. Child tables
+    are shared and use the same DELETE+INSERT path either way.
+    """
+    if target == "claude":
+        upsert_claude_parity_row(conn, parsed["row"])
+    else:
+        upsert_session_row(conn, parsed["row"])
     sess_uuid = parsed["session_uuid"]
     replace_child_rows(
         conn, "session_pr_links", sess_uuid,
@@ -116,7 +147,8 @@ def ingest_all(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, in
     """
     apply_legacy_parity_schema(conn)
     worker_names = _worker_name_lookup(conn)
-    watermarks = _existing_watermarks(conn)
+    claude_watermarks = _existing_claude_watermarks(conn)
+    hermes_watermarks = _existing_hermes_watermarks(conn)
     stats = {"claude_scanned": 0, "claude_updated": 0,
              "hermes_scanned": 0, "hermes_updated": 0, "skipped": 0}
 
@@ -131,7 +163,11 @@ def ingest_all(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, in
                     continue
                 stats["claude_scanned"] += 1
                 mt = _mtime_iso(jl)
-                if not force and watermarks.get(uid) == mt and mt is not None:
+                if (
+                    not force
+                    and claude_watermarks.get(uid) == mt
+                    and mt is not None
+                ):
                     stats["skipped"] += 1
                     continue
                 parsed = parse_claude_jsonl(
@@ -141,7 +177,7 @@ def ingest_all(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, in
                 )
                 # Override mtime with disk value so re-skip logic works.
                 parsed["row"]["transcript_mtime"] = mt
-                _commit_parsed(conn, parsed)
+                _commit_parsed(conn, parsed, target="claude")
                 stats["claude_updated"] += 1
 
     # --- Hermes session_*.json -------------------------------------------
@@ -155,14 +191,18 @@ def ingest_all(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, in
                 # The hermes session id IS the file stem.
                 hsid = js.stem
                 mt = _mtime_iso(js)
-                if not force and watermarks.get(hsid) == mt and mt is not None:
+                if (
+                    not force
+                    and hermes_watermarks.get(hsid) == mt
+                    and mt is not None
+                ):
                     stats["skipped"] += 1
                     continue
                 parsed = parse_hermes_session_json(
                     js, profile_name=prof.name, profile_path=str(prof),
                 )
                 parsed["row"]["transcript_mtime"] = mt
-                _commit_parsed(conn, parsed)
+                _commit_parsed(conn, parsed, target="hermes")
                 stats["hermes_updated"] += 1
 
     conn.commit()

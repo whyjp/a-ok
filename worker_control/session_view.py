@@ -303,6 +303,11 @@ def _load_agent_rows(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     Defensive against a DB where the legacy-parity migration hasn't run —
     columns are picked per-table from PRAGMA so missing ones become NULL
     rather than raising.
+
+    Post-split this table holds ONLY Hermes-profile session rows (PK is the
+    hermes session_<host>_<ts>_<rand> id). Native claude transcripts live
+    in ``claude_session_parity`` and are loaded via
+    :func:`_load_claude_parity_rows`.
     """
     out: dict[str, dict[str, Any]] = {}
     if not _has_table(conn, "hermes_agent_sessions"):
@@ -322,6 +327,63 @@ def _load_agent_rows(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         # consumers don't have to ``hasattr``-check.
         row: dict[str, Any] = {c: (r[c] if c in have else None) for c in _AGENT_COLS}
         out[sid] = row
+    return out
+
+
+def _load_claude_parity_rows(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Map ``lower(session_uuid)`` → claude_session_parity column dict.
+
+    Same shape as :func:`_load_agent_rows` so the ledger assembly code can
+    treat either source identically (profile_name/profile_path don't apply
+    to native claude rows and are returned as ``None``).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if not _has_table(conn, "claude_session_parity"):
+        return out
+    have = _safe_columns(conn, "claude_session_parity")
+    cols = ["session_uuid"] + [c for c in _AGENT_COLS if c in have]
+    sql = "SELECT " + ", ".join(cols) + " FROM claude_session_parity"
+    try:
+        cur = conn.execute(sql)
+    except sqlite3.OperationalError:
+        return out
+    for r in cur.fetchall():
+        sid = (r["session_uuid"] or "").lower()
+        if not sid:
+            continue
+        row: dict[str, Any] = {c: (r[c] if c in have else None) for c in _AGENT_COLS}
+        out[sid] = row
+    return out
+
+
+def _load_parent_hermes_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map ``lower(hermes_sessions.uuid)`` → parent ``hermes_runs.hermes_session_id``.
+
+    Used by the ledger reader to decide which parity table holds the
+    session's agent payload — if a parent hermes session_id is set, the
+    metadata comes from ``hermes_agent_sessions``; otherwise the row is a
+    native claude session and its metadata lives in
+    ``claude_session_parity``.
+    """
+    out: dict[str, str] = {}
+    if not _has_table(conn, "hermes_runs") or not _has_table(conn, "hermes_sessions"):
+        return out
+    try:
+        cur = conn.execute(
+            "SELECT s.uuid AS uuid, r.hermes_session_id AS hsid "
+            "FROM hermes_runs r JOIN hermes_sessions s ON s.id = r.session_id "
+            "WHERE r.hermes_session_id IS NOT NULL"
+        )
+    except sqlite3.OperationalError:
+        return out
+    for r in cur.fetchall():
+        sid = (r["uuid"] or "").lower()
+        hsid = (r["hsid"] or "")
+        if not sid or not hsid:
+            continue
+        # Keep the most recently inserted hermes_session_id when multiple
+        # runs link to different parents (rare; the row gets overwritten).
+        out[sid] = hsid
     return out
 
 
@@ -451,6 +513,8 @@ def list_sessions(
             return []
         _auto_reclassify_origins(conn, spawn_prefixes)
         agent_rows = _load_agent_rows(conn)
+        claude_parity_rows = _load_claude_parity_rows(conn)
+        parent_hsid = _load_parent_hermes_map(conn)
         child_arrays = _load_child_arrays(conn)
         sql = _LIST_SQL + " ORDER BY s.last_used_at DESC, s.id DESC"
         rows = conn.execute(sql).fetchall()
@@ -500,8 +564,23 @@ def list_sessions(
         except (IndexError, KeyError):
             notes = None
 
-        agent = agent_rows.get((r["uuid"] or "").lower()) or {}
-        kids = child_arrays.get((r["uuid"] or "").lower()) or {}
+        uuid_lower = (r["uuid"] or "").lower()
+        # Pick the parity payload source: when the session has a parent
+        # hermes_session_id (spawned-by-hermes case), prefer the
+        # hermes_agent_sessions row keyed by that parent id; fall back to
+        # the claude parity row keyed by the session UUID. Native claude
+        # rows have no parent and resolve straight to claude_session_parity.
+        parent_id = parent_hsid.get(uuid_lower)
+        agent: dict[str, Any] = {}
+        if parent_id:
+            agent = agent_rows.get(parent_id.lower()) or {}
+        if not agent:
+            agent = claude_parity_rows.get(uuid_lower) or {}
+        if not agent:
+            # Last-resort fallback for legacy DBs where claude rows still
+            # live in hermes_agent_sessions keyed by claude UUID (pre-split).
+            agent = agent_rows.get(uuid_lower) or {}
+        kids = child_arrays.get(uuid_lower) or {}
 
         out.append(SessionView(
             id=r["id"],
