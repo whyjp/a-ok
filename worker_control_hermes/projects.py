@@ -405,6 +405,12 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         base_name = args.name or _slugify(args.brief or "", "session")
         if not base_name:
             raise SystemExit("Session name is empty after slugify; pass --name")
+        # Stamp the reserved a-ok namespace on the session name too — the
+        # dashboard classifier matches name OR last_run_name with this
+        # prefix, so a freshly-allocated session with 0 runs (e.g. a race
+        # between INSERT into hermes_sessions and INSERT into hermes_runs)
+        # still lands in the spawn tab. Idempotent: never doubles up.
+        base_name = _ensure_a_ok_prefix(base_name)
         now = _now()
         try:
             conn.execute(
@@ -864,8 +870,18 @@ def _next_run_index(conn: sqlite3.Connection, session_id: int) -> int:
     return (row["m"] or 0) + 1
 
 
+A_OK_PREFIX = "a-ok:"
+
+
+def _ensure_a_ok_prefix(base: str) -> str:
+    """Stamp the reserved ``a-ok:`` namespace onto ``base`` (idempotent)."""
+    if base.startswith(A_OK_PREFIX):
+        return base
+    return A_OK_PREFIX + base
+
+
 def _run_name(base: str, idx: int) -> str:
-    # Format: "a-ok:<base>-r<idx>"
+    # Format: "a-ok:<base>-r<idx>".
     # The `a-ok:` prefix is RESERVED for sessions spawned by the a-ok
     # (worker-control) dispatcher running inside this Hermes worker profile.
     # The dashboard's classifier (worker_control.hermes_ledger) treats this
@@ -875,19 +891,23 @@ def _run_name(base: str, idx: int) -> str:
     # by a `/rename` (the prefix lives on hermes_runs.name, not on the
     # user-facing claude-side label).
     #
-    # The colon (a-ok:) — not a dash — is intentional: it visibly marks
-    # the run name as carrying a namespace, distinguishes a-ok-owned runs
-    # from any historical `a-ok-...` slug a human might have chosen for
-    # their own task names, and reads as "a-ok namespace, session id X".
+    # ``base`` may already carry the prefix (we now stamp it on
+    # ``hermes_sessions.name`` at session_start too, so the spawn classifier
+    # still works when a session has 0 runs); _run_name MUST be idempotent
+    # against that to avoid "a-ok:a-ok:..." double-stamps.
     #
     # If you change this, also update:
     #   * D:/work-github/a-ok worker_control/hermes_ledger.py
     #     (A_OK_SPAWN_PREFIX constant)
     #   * hermes-pm-dispatcher-profile skill (classifier docs)
-    prefix = "a-ok:"
+    base = _ensure_a_ok_prefix(base)
     suffix = f"-r{idx}"
-    max_base = max(8, 80 - len(prefix) - len(suffix))
-    return prefix + base[:max_base] + suffix
+    max_total = 80
+    if len(base) + len(suffix) <= max_total:
+        return base + suffix
+    # truncate the *post-prefix* portion only, never the prefix itself
+    keep = max(len(A_OK_PREFIX) + 8, max_total - len(suffix))
+    return base[:keep] + suffix
 
 
 def cmd_run_start(args: argparse.Namespace) -> None:
