@@ -20,11 +20,23 @@ from __future__ import annotations
 import json
 import webbrowser
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from worker_control import __version__
-from worker_control.db import utcnow_iso
+from worker_control.db import connect as connect_canonical, utcnow_iso
+from worker_control.hermes_ledger import (
+    HermesSessionView,
+    hermes_session_counters,
+    is_spawn,
+    list_hermes_sessions,
+)
+from worker_control.hermes_profiles import (
+    HermesProfile,
+    discover_hermes_profiles,
+    hermes_profile_to_dict,
+)
 from worker_control.native_sessions import (
     NativeSnapshot,
     discover_native_sessions,
@@ -74,9 +86,20 @@ class DashboardSnapshot:
     runtime_root: str
     workspace_roots: list[WorkspaceRootView] = field(default_factory=list)
     profiles: list[dict[str, Any]] = field(default_factory=list)
+    # Hermes profiles auto-discovered from disk (~/AppData/Local/hermes/
+    # profiles/<name>/). Independent of `profiles` above (which is
+    # worker_control's own DB-backed worker_profiles table) so the dashboard
+    # can show both sources side by side.
+    hermes_profiles: list[dict[str, Any]] = field(default_factory=list)
+    hermes_home: str = ""
+    hermes_home_exists: bool = False
     projects: list[dict[str, Any]] = field(default_factory=list)
     hermes_sessions: list[dict[str, Any]] = field(default_factory=list)
     native_sessions: list[dict[str, Any]] = field(default_factory=list)
+    # Hermes turn-by-turn sessions (one row per ~/AppData/Local/hermes/
+    # profiles/<name>/sessions/session_*.json), joined with the claude runs
+    # they spawned via hermes_runs.hermes_session_id.
+    hermes_agent_sessions: list[dict[str, Any]] = field(default_factory=list)
     native_root: str = ""
     native_root_exists: bool = False
     native_note: str | None = None
@@ -135,6 +158,140 @@ def _session_to_dict(s, profile_by_id, project_by_id) -> dict[str, Any]:
     }
 
 
+def _hermes_ledger_to_dict(v: HermesSessionView) -> dict[str, Any]:
+    """HermesSessionView → JSON-serializable dict for the BFF response."""
+    return {
+        "id": v.id,
+        "uuid": v.uuid,
+        "name": v.name,
+        "status": v.status,
+        "origin": v.origin,
+        "classification": v.classification,
+        "spawn_reason": v.spawn_reason,
+        "dispatch_mode": v.dispatch_mode,
+        "run_count": v.run_count,
+        "print_run_count": v.print_run_count,
+        "last_run_index": v.last_run_index,
+        "last_run_name": v.last_run_name,
+        "last_run_mode": v.last_run_mode,
+        "last_run_status": v.last_run_status,
+        "last_run_started_at": v.last_run_started_at,
+        "last_run_ended_at": v.last_run_ended_at,
+        "model": v.model,
+        "permission_mode": v.permission_mode,
+        "brief": v.brief,
+        "claude_name": v.claude_name,
+        "claude_status": v.claude_status,
+        "claude_status_at": v.claude_status_at,
+        "project_id": v.project_id,
+        "project_name": v.project_name,
+        "project_path": v.project_path,
+        "project_role": v.project_role,
+        "created_at": v.created_at,
+        "last_used_at": v.last_used_at,
+        "ended_at": v.ended_at,
+    }
+
+
+def _collect_hermes_session_panel(
+    ledger: list[HermesSessionView],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Build the "Hermes session" dashboard panel — one row per Hermes turn-by-
+    turn session that ever dispatched a claude run (we discover the link via
+    ``hermes_runs.hermes_session_id``). Each row carries the list of
+    claude-side ledger rows it spawned, plus a deep-link path to the JSON
+    transcript on disk so the FE can offer a "바로가기" button.
+
+    Hermes sessions that didn't spawn any claude run still get a row IF the
+    sessions/*.json file is discoverable, but with empty `spawned_claudes`.
+    Hermes sessions we only know about through ``hermes_runs.hermes_session_id``
+    but whose transcript file we can't find still show up (with `transcript`
+    set to ``None`` and a `discovered_via='runs_only'` flag).
+    """
+    from worker_control.hermes_profiles import discover_hermes_profiles
+
+    # 1. Group ledger rows by hermes_session_id (NULL skipped). We need a
+    #    second pass over the DB to read the column directly — the ledger
+    #    view doesn't carry it, and adding it there would bloat every row.
+    rows_by_hsess: dict[str, list[dict[str, Any]]] = {}
+    try:
+        with connect_canonical() as conn:
+            cur = conn.execute(
+                "SELECT s.id AS sess_db_id, s.uuid, s.name, s.project_id, "
+                "       r.hermes_session_id "
+                "FROM hermes_runs r "
+                "JOIN hermes_sessions s ON s.id = r.session_id "
+                "WHERE r.hermes_session_id IS NOT NULL "
+                "GROUP BY s.id, r.hermes_session_id"
+            )
+            for r in cur.fetchall():
+                rows_by_hsess.setdefault(r["hermes_session_id"], []).append({
+                    "claude_session_db_id": r["sess_db_id"],
+                    "claude_uuid":          r["uuid"],
+                    "claude_name":          r["name"],
+                })
+    except Exception:
+        rows_by_hsess = {}
+
+    # 2. For every hermes profile we know about (default + worker), discover
+    #    its sessions/*.json files. Match by basename = session_id.
+    transcripts: dict[str, dict[str, Any]] = {}
+    for prof in discover_hermes_profiles():
+        sessions_dir = Path(prof.path) / "sessions"
+        if not sessions_dir.is_dir():
+            continue
+        for jf in sessions_dir.glob("session_*.json"):
+            # filename: session_<YYYYMMDD_HHMMSS_xxxxxx>.json
+            sid = jf.stem[len("session_"):]
+            if not sid:
+                continue
+            try:
+                st = jf.stat()
+            except OSError:
+                continue
+            transcripts[sid] = {
+                "profile_name":  prof.name,
+                "profile_path":  prof.path,
+                "transcript":    str(jf),
+                "transcript_size":  st.st_size,
+                "transcript_mtime":
+                    datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+                            .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+
+    # 3. Merge — every key from either set produces a panel row.
+    all_keys = set(transcripts) | set(rows_by_hsess)
+    rows_out: list[dict[str, Any]] = []
+    for sid in all_keys:
+        t = transcripts.get(sid)
+        spawned = rows_by_hsess.get(sid, [])
+        rows_out.append({
+            "hermes_session_id":  sid,
+            "profile_name":       t["profile_name"]  if t else None,
+            "profile_path":       t["profile_path"]  if t else None,
+            "transcript":         t["transcript"]    if t else None,
+            "transcript_size":    t["transcript_size"]  if t else 0,
+            "transcript_mtime":   t["transcript_mtime"] if t else None,
+            "discovered_via":     "transcript+runs" if (t and spawned)
+                                  else ("transcript_only" if t else "runs_only"),
+            "spawned_claudes":    spawned,
+            "spawned_count":      len(spawned),
+        })
+    # Newest first by transcript_mtime (None last).
+    rows_out.sort(
+        key=lambda r: (r["transcript_mtime"] or "", r["hermes_session_id"]),
+        reverse=True,
+    )
+    counters = {
+        "hermes_agent_sessions":         len(rows_out),
+        "hermes_agent_with_spawn":       sum(1 for r in rows_out if r["spawned_count"]),
+        "hermes_agent_orphaned_runs":    sum(
+            1 for r in rows_out if r["discovered_via"] == "runs_only"
+        ),
+    }
+    return rows_out, counters
+
+
 def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
     """현재 DB 상태 + native 세션 디스커버리 결과를 한 묶음으로 모은다."""
     # 워크스페이스 루트
@@ -154,14 +311,46 @@ def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
     profile_by_id = {p.id: p for p in profiles}
     project_by_id = {p.id: p for p in projs}
 
-    # native 세션 (read-only)
+    # native 세션 jsonl 디스커버리는 이제 **보조정보** 로만 본다 (root 경로/
+    # 디스커버리 가능 여부/디렉토리 메타). 화면 표시용 행은 모두 단일 ledger
+    # (`hermes_sessions` 테이블) 에서 나온다 — 사용자가 호스트의 단일 ledger
+    # 를 `scv-` prefix 유무로만 두 탭에 분할하길 원함.
     try:
         native: NativeSnapshot = discover_native_sessions(limit=native_limit)
-    except Exception as exc:  # 안전망 — discovery 실패해도 대시보드는 떠야 함
+    except Exception as exc:
         native = NativeSnapshot(
             root="(error)", root_exists=False,
             note=f"native 디스커버리 중 예외: {exc}",
         )
+
+    # ── 단일 ledger (hermes_sessions JOIN hermes_runs JOIN projects) ──────
+    # 159 개 행 전체를 한 번 가져와서 `scv-` prefix 유무로 두 분할:
+    #   * scv_spawned         → "Hermes 스폰 세션" 탭 (= hermes_sessions 페이로드)
+    #   * scv- 가 없는 나머지 → "Native 세션" 탭 (= native_sessions 페이로드)
+    # `hermes_ledger_sessions` 라는 별도 카운터/배열은 더 이상 만들지 않는다.
+    try:
+        ledger: list[HermesSessionView] = list_hermes_sessions()
+    except Exception:
+        ledger = []
+    scv_rows: list[HermesSessionView]    = []
+    native_rows: list[HermesSessionView] = []
+    for v in ledger:
+        if is_spawn(v):
+            scv_rows.append(v)
+        else:
+            native_rows.append(v)
+
+    # Hermes profiles auto-discovered from disk (read-only).
+    from worker_control.hermes_profiles import hermes_home as _hh
+    home_path = _hh()
+    try:
+        hermes_profs: list[HermesProfile] = discover_hermes_profiles()
+    except Exception:
+        hermes_profs = []
+    hermes_profs_dicts = [hermes_profile_to_dict(p) for p in hermes_profs]
+
+    # Hermes turn-by-turn sessions + their claude spawn relationships.
+    hermes_agent_rows, hermes_agent_counters = _collect_hermes_session_panel(ledger)
 
     snap = DashboardSnapshot(
         generated_at=utcnow_iso(),
@@ -170,16 +359,20 @@ def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
         runtime_root=str(runtime_root()),
         workspace_roots=roots,
         profiles=[_profile_to_dict(p) for p in profiles],
+        hermes_profiles=hermes_profs_dicts,
+        hermes_home=str(home_path),
+        hermes_home_exists=home_path.is_dir(),
         projects=[_project_to_dict(p) for p in projs],
-        hermes_sessions=[
-            _session_to_dict(s, profile_by_id, project_by_id) for s in sess
-        ],
-        native_sessions=[asdict(n) for n in native.sessions],
+        # 두 탭의 페이로드 — 같은 ledger 테이블의 행을 prefix 로 분할:
+        hermes_sessions=[_hermes_ledger_to_dict(v) for v in scv_rows],
+        native_sessions=[_hermes_ledger_to_dict(v) for v in native_rows],
+        hermes_agent_sessions=hermes_agent_rows,
         native_root=native.root,
         native_root_exists=native.root_exists,
         native_note=native.note,
         counters={
             "profiles": len(profiles),
+            "hermes_profiles": len(hermes_profs),
             "projects": len(projs),
             "projects_owned": sum(
                 1 for p in projs if p.root_role == ROLE_OWNED_WORK
@@ -189,11 +382,17 @@ def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
             ),
             "projects_git": sum(1 for p in projs if p.is_git),
             "projects_dirty": sum(1 for p in projs if p.is_dirty),
-            "hermes_sessions": len(sess),
-            "hermes_running": sum(
-                1 for s in sess if s.state in ("running", "working")
-            ),
-            "native_sessions": len(native.sessions),
+            # 세션 사용 형태 카운터 (전체 ledger 159 기준).
+            # `hermes_session_counters` 가 hermes_spawned/print_spawned/
+            # prefix_spawned/interactive_multi/native + ledger_total 을 한꺼번에
+            # 채워준다. 탭 분배는 그 결과의 `hermes_spawned` 가 곧 scv_rows 길이.
+            **hermes_session_counters(ledger),
+            # 탭 분배 결과 (`hermes_spawned` 와 같지만 시맨틱 명확화 위해 별도 키)
+            "hermes_sessions": len(scv_rows),
+            "native_sessions": len(native_rows),
+            # 보조: 호스트 디스크 jsonl 파일 카운트 (디버그용, ledger 와 무관)
+            "native_jsonl_files": len(native.sessions),
+            **hermes_agent_counters,
         },
     )
     return snap
@@ -213,9 +412,13 @@ def snapshot_to_payload(snap: DashboardSnapshot) -> dict[str, Any]:
         "runtime_root": snap.runtime_root,
         "workspace_roots": [asdict(r) for r in snap.workspace_roots],
         "profiles": snap.profiles,
+        "hermes_profiles": snap.hermes_profiles,
+        "hermes_home": snap.hermes_home,
+        "hermes_home_exists": snap.hermes_home_exists,
         "projects": snap.projects,
         "hermes_sessions": snap.hermes_sessions,
         "native_sessions": snap.native_sessions,
+        "hermes_agent_sessions": snap.hermes_agent_sessions,
         "native_root": snap.native_root,
         "native_root_exists": snap.native_root_exists,
         "native_note": snap.native_note,

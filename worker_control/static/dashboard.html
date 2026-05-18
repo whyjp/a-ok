@@ -45,6 +45,8 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 a { color: var(--info); text-decoration: none; }
+a.spawn-chip { cursor: pointer; margin-right: 4px; display: inline-block; }
+a.spawn-chip:hover .badge { filter: brightness(1.2); }
 a:hover { text-decoration: underline; }
 code, .mono { font-family: var(--mono); }
 
@@ -357,6 +359,9 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     <button class="tab" role="tab" data-target="hermes">
       Hermes 스폰 세션 <span class="pill" id="c-hermes">0</span>
     </button>
+    <button class="tab" role="tab" data-target="hermes-agent">
+      Hermes 세션 <span class="pill" id="c-hermes-agent">0</span>
+    </button>
     <button class="tab" role="tab" data-target="native">
       Native 세션 <span class="pill" id="c-native">0</span>
     </button>
@@ -371,12 +376,20 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <div>
         <div class="panel-title">워커 프로파일</div>
         <div class="panel-desc">
-          <code>workerctl profiles</code> 가 관리하는 워커 실행 프로파일 목록.
-          각 프로파일은 워커가 어떤 루트에서 기동될지를 묶는 라벨이다.
+          두 가지 출처를 함께 보여준다 —
+          (1) <code>workerctl profiles</code> 가 DB 에 등록한 워커 실행 프로파일,
+          (2) <code>~/AppData/Local/hermes/</code> 디스크에서 디스커버한
+          <strong>Hermes Agent 프로파일</strong> (default + profiles/&lt;name&gt;/).
+          DB 가 비어 있어도 hermes 측 프로파일은 항상 표시된다.
         </div>
       </div>
       <div class="panel-tools">
-        <input class="search" type="search" placeholder="이름/루트로 검색"
+        <select class="select" data-filter-src="workers">
+          <option value="">모든 출처</option>
+          <option value="db">workerctl DB</option>
+          <option value="hermes">Hermes 디스크</option>
+        </select>
+        <input class="search" type="search" placeholder="이름/모델/경로 검색"
                data-filter="workers" />
       </div>
     </div>
@@ -384,8 +397,9 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <table>
         <thead>
           <tr>
-            <th>#</th><th>이름</th><th>기본 루트</th>
-            <th>생성</th><th>업데이트</th>
+            <th>출처</th><th>이름</th><th>모델</th>
+            <th>skills</th><th>sessions</th>
+            <th>경로</th><th>최종 수정</th>
           </tr>
         </thead>
         <tbody id="t-workers"></tbody>
@@ -393,31 +407,38 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     </div>
   </section>
 
-  <!-- Hermes 세션 패널 -->
+  <!-- Hermes 스폰 세션 패널 (scv- prefix 가 붙은 ledger 행만) -->
   <section class="panel" id="p-hermes" role="tabpanel">
     <div class="panel-head">
       <div>
         <div class="panel-title">Hermes 스폰 세션</div>
         <div class="panel-desc">
-          worker-control 이 직접 띄운 (= Hermes 오케스트레이션 대상) Claude 워커
-          세션. <code>worker_sessions</code> 테이블 기준.
-          모두 <code>claude --permission-mode auto</code> 일반 모드로 기동된다.
+          단일 <code>hermes_sessions</code> ledger 중 <strong>run name 이
+          <code>a-ok:</code> prefix 로 시작하는 행</strong> 만 표시한다 — 즉
+          a-ok worker-control 디스패처(<code>scripts/projects.py::_run_name()</code>)
+          가 발사한 claude 세션. claude <code>/rename</code> 으로도 이 prefix
+          는 사라지지 않는다.
+          <span class="path"><code>claude -p</code> 여부는 별도 컬럼으로만
+          표시 — 사람이 직접 -p 를 호출할 수도 있으므로 spawn 시그널이 아니다.
+          추가 디스패처 prefix 가 있으면 <code>WORKER_CONTROL_EXTRA_SPAWN_PREFIXES</code>
+          env 로 등록.</span>
         </div>
       </div>
       <div class="panel-tools">
-        <select class="select" data-filter-state="hermes">
+        <select class="select" data-filter-status="hermes">
           <option value="">모든 상태</option>
-          <option>starting</option>
-          <option>running</option>
-          <option>waiting_input</option>
-          <option>working</option>
-          <option>blocked</option>
-          <option>completed</option>
+          <option>active</option>
+          <option>done</option>
           <option>failed</option>
-          <option>killed</option>
+          <option>abandoned</option>
+        </select>
+        <select class="select" data-filter-mode="hermes">
+          <option value="">모든 dispatch</option>
+          <option value="print">print (claude -p one-shot)</option>
+          <option value="interactive">interactive (--resume)</option>
         </select>
         <input class="search" type="search"
-               placeholder="이름/프로젝트/프로파일 검색"
+               placeholder="이름/UUID/프로젝트/brief 검색"
                data-filter="hermes" />
       </div>
     </div>
@@ -425,9 +446,9 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <table>
         <thead>
           <tr>
-            <th>#</th><th>이름</th><th>상태</th><th>runtime</th>
-            <th>프로파일</th><th>프로젝트</th>
-            <th>tmux / pid</th><th>started</th>
+            <th>#</th><th>이름</th><th>마지막 dispatch</th>
+            <th>runs (-p / total)</th><th>상태</th>
+            <th>프로젝트</th><th>UUID</th><th>last used</th>
           </tr>
         </thead>
         <tbody id="t-hermes"></tbody>
@@ -435,20 +456,71 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     </div>
   </section>
 
-  <!-- Native 세션 패널 -->
+  <!-- Hermes 세션 패널 (turn-by-turn hermes-agent 세션 + claude spawn 트리) -->
+  <section class="panel" id="p-hermes-agent" role="tabpanel">
+    <div class="panel-head">
+      <div>
+        <div class="panel-title">Hermes 세션 (turn-by-turn)</div>
+        <div class="panel-desc">
+          <code>~/AppData/Local/hermes/profiles/&lt;name&gt;/sessions/session_*.json</code>
+          으로부터 디스커버한 Hermes Agent 의 턴-바이-턴 세션. claude run 이
+          이 세션에서 발사된 경우 <code>hermes_runs.hermes_session_id</code>
+          링크로 자식 spawn 을 묶어 보여준다. <strong>바로가기</strong> 컬럼의
+          transcript 링크를 클릭하면 OS 기본 앱이 JSON 을 연다.
+        </div>
+      </div>
+      <div class="panel-tools">
+        <select class="select" data-filter-spawn="hermes-agent">
+          <option value="">모두</option>
+          <option value="with_spawn">claude spawn 있는 세션만</option>
+          <option value="no_spawn">spawn 없는 세션만</option>
+        </select>
+        <input class="search" type="search"
+               placeholder="session id / profile / 자식 UUID 검색"
+               data-filter="hermes-agent" />
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>session id</th><th>profile</th>
+            <th>discovered via</th><th>spawned claude</th>
+            <th>transcript</th><th>mtime</th>
+          </tr>
+        </thead>
+        <tbody id="t-hermes-agent"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Native 세션 패널 (scv- prefix 가 없는 ledger 행) -->
   <section class="panel" id="p-native" role="tabpanel">
     <div class="panel-head">
       <div>
         <div class="panel-title">Native Claude 세션</div>
         <div class="panel-desc">
-          이 호스트의 <code>~/.claude/projects/</code> 아래에 남아있는 Claude
-          CLI 세션 로그. <strong>읽기 전용</strong> 으로 디스커버리한다 — 파일
-          위치/포맷이 호스트마다 다를 수 있으므로 휴리스틱으로 인코딩을 푼다.
+          같은 <code>hermes_sessions</code> ledger 중 <strong>spawn 시그널이
+          없는 행</strong> — 사람이 직접 띄웠거나 <code>session sync-native</code>
+          로 임포트된 세션. run 이 있으면 multi-turn 분류로 함께 표시.
+          <span class="path">jsonl 파일 디스커버리: <code id="native-root">—</code></span>
         </div>
       </div>
       <div class="panel-tools">
+        <select class="select" data-filter-class="native">
+          <option value="">모든 분류</option>
+          <option value="interactive_multi">interactive multi-turn</option>
+          <option value="native">native (run 없음)</option>
+        </select>
+        <select class="select" data-filter-status="native">
+          <option value="">모든 상태</option>
+          <option>active</option>
+          <option>done</option>
+          <option>failed</option>
+          <option>abandoned</option>
+        </select>
         <input class="search" type="search"
-               placeholder="세션 ID / 경로 / permissionMode 검색"
+               placeholder="이름/UUID/프로젝트/brief 검색"
                data-filter="native" />
       </div>
     </div>
@@ -457,16 +529,15 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       <table>
         <thead>
           <tr>
-            <th>세션 ID</th><th>프로젝트 (추정)</th><th>permissionMode</th>
-            <th>줄 수</th><th>크기</th><th>수정</th>
+            <th>#</th><th>이름</th><th>분류</th><th>마지막 dispatch</th>
+            <th>runs (-p / total)</th><th>상태</th>
+            <th>프로젝트</th><th>UUID</th><th>last used</th>
           </tr>
         </thead>
         <tbody id="t-native"></tbody>
       </table>
     </div>
     <div class="footnote">
-      native 세션 디렉토리:
-      <code id="native-root">—</code> ·
       덮어쓰기: <span class="kbd">WORKER_CONTROL_CLAUDE_PROJECTS_DIR</span>
     </div>
   </section>
@@ -581,7 +652,8 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
 
     const c = data.counters || {};
     const cards = [
-      { label: "프로파일",       value: c.profiles,        cls: "" },
+      { label: "프로파일",       value: (c.profiles || 0) + (c.hermes_profiles || 0),
+        cls: "", hint: ((c.profiles || 0) + " DB · " + (c.hermes_profiles || 0) + " hermes") },
       { label: "프로젝트 (전체)", value: c.projects,        cls: "info" },
       { label: "owned_work",    value: c.projects_owned,  cls: "accent",
         hint: "편집/PR 가능" },
@@ -589,9 +661,23 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
         hint: "read-only" },
       { label: "git 저장소",     value: c.projects_git,    cls: "" },
       { label: "dirty",         value: c.projects_dirty,  cls: c.projects_dirty ? "danger" : "" },
-      { label: "Hermes 세션",   value: c.hermes_sessions, cls: "info" },
-      { label: "running",       value: c.hermes_running,  cls: c.hermes_running ? "accent" : "" },
-      { label: "Native 세션",   value: c.native_sessions, cls: "" }
+      { label: "Hermes 스폰",   value: c.hermes_spawned || 0,
+        cls: (c.hermes_spawned ? "accent" : ""),
+        hint: "a-ok: prefix 매치 세션" },
+      { label: "Native",        value: c.native_sessions || 0,
+        cls: "", hint: "사람·sync-native·legacy" },
+      { label: "ledger 총",     value: c.hermes_ledger_total || 0,
+        cls: "info", hint: "spawned + native = 전체" },
+      { label: "print -p 사용", value: c.hermes_sessions_with_print_run || 0,
+        cls: "info",
+        hint: "spawn/native 무관하게 -p 호출 흔적 있는 세션" },
+      { label: "multi-turn",    value: c.hermes_interactive_multi || 0,
+        cls: "warn", hint: "--resume 체인 (non-a-ok)" },
+      { label: "Hermes 세션",   value: c.hermes_agent_sessions || 0,
+        cls: "", hint: "turn-by-turn transcript" },
+      { label: "spawn 보유",    value: c.hermes_agent_with_spawn || 0,
+        cls: (c.hermes_agent_with_spawn ? "accent" : ""),
+        hint: "claude 자식 spawn 한 hermes 세션" }
     ];
     const sumEl = document.getElementById("summary");
     if (sumEl) {
@@ -605,9 +691,13 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       }).join("");
     }
 
-    setText("c-workers",  c.profiles);
-    setText("c-hermes",   c.hermes_sessions);
-    setText("c-native",   c.native_sessions);
+    // c-workers pill counts the merged total (DB + hermes disk), so the user
+    // sees the same number that the table actually shows.
+    const workersTotal = (c.profiles || 0) + (c.hermes_profiles || 0);
+    setText("c-workers",  workersTotal);
+    setText("c-hermes",   c.hermes_spawned || 0);
+    setText("c-hermes-agent", c.hermes_agent_sessions || 0);
+    setText("c-native",   c.native_sessions || 0);
     setText("c-projects", c.projects);
   }
 
@@ -626,75 +716,229 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
   });
 
   // --- renderers ---
-  function renderWorkers(filterText) {
+  function renderWorkers(filterText, srcFilter) {
     if (!data) return;
     const ft = (filterText || "").toLowerCase();
-    const rows = (data.profiles || []).filter(function(p) {
-      if (!ft) return true;
-      return (p.name + " " + p.root_path).toLowerCase().indexOf(ft) >= 0;
+    const sf = (srcFilter || "").trim();
+
+    // Merge two sources: worker_control DB rows + hermes disk discovery.
+    // Each row is normalized to the same shape so the table is uniform.
+    const dbRows = (data.profiles || []).map(function(p) {
+      return {
+        source: "db",
+        name: p.name,
+        model: null,
+        provider: null,
+        path: p.root_path,
+        skills_count: null,
+        sessions_count: null,
+        last_modified: p.updated_at || p.created_at,
+        is_default: false,
+        has_soul: false,
+        has_env: false,
+        has_auth: false,
+        alias_hint: null,
+        id: p.id
+      };
     });
+    const hermesRows = (data.hermes_profiles || []).map(function(p) {
+      return {
+        source: "hermes",
+        name: p.name,
+        model: p.model,
+        provider: p.provider,
+        path: p.path,
+        skills_count: p.skills_count,
+        sessions_count: p.sessions_count,
+        last_modified: p.last_session_at || p.last_modified,
+        is_default: !!p.is_default,
+        has_soul: !!p.has_soul,
+        has_env: !!p.has_env,
+        has_auth: !!p.has_auth,
+        alias_hint: p.alias_hint,
+        id: null
+      };
+    });
+    let merged = dbRows.concat(hermesRows);
+    if (sf) merged = merged.filter(function(r) { return r.source === sf; });
+    if (ft) {
+      merged = merged.filter(function(r) {
+        const blob = [r.name, r.model, r.provider, r.path, r.alias_hint]
+          .join(" ").toLowerCase();
+        return blob.indexOf(ft) >= 0;
+      });
+    }
+
     const tbody = document.getElementById("t-workers");
-    if (!rows.length) {
-      tbody.innerHTML = emptyRow(5,
-        "프로파일이 없습니다. `workerctl profiles create <name>` 로 만드세요.");
+    if (!merged.length) {
+      const hermesEmpty = (data.hermes_profiles || []).length === 0;
+      const dbEmpty     = (data.profiles || []).length === 0;
+      const msg = (hermesEmpty && dbEmpty)
+        ? "프로파일이 없습니다. `hermes profile create <name>` (hermes 측) 또는 "
+          + "`workerctl profiles create <name>` (workerctl DB) 로 만드세요."
+        : "필터에 일치하는 프로파일이 없습니다.";
+      tbody.innerHTML = emptyRow(7, msg);
       return;
     }
-    tbody.innerHTML = rows.map(function(p) {
+
+    function sourceBadge(src, isDefault) {
+      if (src === "hermes") {
+        const txt = isDefault ? "hermes · default" : "hermes";
+        return "<span class='badge accent plain'>" + escapeHtml(txt) + "</span>";
+      }
+      return "<span class='badge info plain'>workerctl</span>";
+    }
+    function fileBadges(r) {
+      if (r.source !== "hermes") return "";
+      const tags = [];
+      if (r.has_soul) tags.push("<span class='badge muted plain'>SOUL</span>");
+      if (r.has_env)  tags.push("<span class='badge muted plain'>.env</span>");
+      if (r.has_auth) tags.push("<span class='badge muted plain'>auth</span>");
+      return tags.length
+        ? "<div style='margin-top:4px'>" + tags.join(" ") + "</div>"
+        : "";
+    }
+
+    tbody.innerHTML = merged.map(function(r) {
+      const modelCell = r.model
+        ? "<strong>" + escapeHtml(r.model) + "</strong>"
+            + (r.provider ? "<div class='path'>" + escapeHtml(r.provider) + "</div>" : "")
+        : "<span class='path'>—</span>";
+      const skillsCell = r.skills_count != null
+        ? "<span class='mono'>" + r.skills_count + "</span>"
+        : "<span class='path'>—</span>";
+      const sessionsCell = r.sessions_count != null
+        ? "<span class='mono'>" + r.sessions_count + "</span>"
+        : "<span class='path'>—</span>";
       return ""
         + "<tr>"
-        +   "<td class='mono'>" + p.id + "</td>"
-        +   "<td><strong>" + escapeHtml(p.name) + "</strong></td>"
-        +   "<td><span class='path'>" + escapeHtml(p.root_path || "") + "</span></td>"
-        +   "<td class='mono'>" + escapeHtml(p.created_at || "—") + "</td>"
-        +   "<td class='mono'>" + escapeHtml(p.updated_at || "—") + "</td>"
+        +   "<td>" + sourceBadge(r.source, r.is_default) + "</td>"
+        +   "<td><strong>" + escapeHtml(r.name) + "</strong>"
+        +       fileBadges(r)
+        +       (r.alias_hint
+                  ? "<div class='path'>alias: " + escapeHtml(r.alias_hint) + "</div>"
+                  : "")
+        +   "</td>"
+        +   "<td>" + modelCell + "</td>"
+        +   "<td>" + skillsCell + "</td>"
+        +   "<td>" + sessionsCell + "</td>"
+        +   "<td><span class='path'>" + escapeHtml(r.path || "") + "</span></td>"
+        +   "<td class='mono'>" + escapeHtml(r.last_modified || "—") + "</td>"
         + "</tr>";
     }).join("");
   }
 
-  function renderHermes(filterText, stateFilter) {
+  // ── 공통 ledger-row 렌더링 (Hermes 스폰 / Native 양쪽이 같은 스키마) ──
+  // 백엔드는 단일 hermes_sessions ledger 를 `scv-` prefix 로 두 분할해서
+  // 각각 `data.hermes_sessions` / `data.native_sessions` 로 내려준다. 두
+  // 탭 모두 같은 row 모양이므로 하나의 헬퍼로 그린다.
+  function ledgerClassBadge(s) {
+    const cls = (typeof s === "object" && s !== null) ? s.classification : s;
+    const reason = (typeof s === "object" && s !== null) ? s.spawn_reason : null;
+    const m = {
+      "a_ok_spawned":      { txt: "a-ok spawn",   cls: "accent" },
+      "interactive_multi": { txt: "multi-turn",   cls: "warn" },
+      "native":            { txt: "native",       cls: "muted" }
+    };
+    const o = m[cls] || { txt: cls || "—", cls: "muted" };
+    let txt = o.txt;
+    if (cls === "a_ok_spawned" && reason && reason.indexOf("prefix:") === 0) {
+      txt = reason.slice("prefix:".length) + " spawn";
+    }
+    return "<span class='badge " + o.cls + " plain' title='"
+           + escapeHtml(reason || cls || "")
+           + "'>" + escapeHtml(txt) + "</span>";
+  }
+  function ledgerModeBadge(mode) {
+    if (!mode || mode === "—") return "<span class='badge muted plain'>—</span>";
+    const cls = (mode === "print") ? "info" : "accent";
+    const txt = (mode === "print") ? "-p (print)" : "interactive";
+    return "<span class='badge " + cls + " plain'>" + escapeHtml(txt) + "</span>";
+  }
+  function ledgerStatusBadge(st) {
+    const m = {
+      "active":    "accent",
+      "done":      "info",
+      "failed":    "danger",
+      "abandoned": "warn"
+    };
+    return "<span class='badge " + (m[st] || "muted") + " plain'>"
+           + escapeHtml(st || "—") + "</span>";
+  }
+  function ledgerRowHtml(s, opts) {
+    const showClass = !!(opts && opts.showClass);
+    const lastRun = s.last_run_name
+      ? "<div class='path'>" + escapeHtml(s.last_run_name) + "</div>"
+      : "";
+    const lastRunTime = s.last_run_started_at || s.last_used_at || "—";
+    const runCounts = "<strong>" + (s.print_run_count || 0) + "</strong>"
+      + " / " + (s.run_count || 0);
+    const claudeName = (s.claude_name && s.claude_name !== s.name)
+      ? "<div class='path'>claude /name: " + escapeHtml(s.claude_name) + "</div>"
+      : "";
+    const briefDiv = s.brief
+      ? "<div class='path'>" + escapeHtml((s.brief || "").slice(0, 120)) + "</div>"
+      : "";
+    return ""
+      + "<tr>"
+      +   "<td class='mono'>" + s.id + "</td>"
+      +   "<td><strong>" + escapeHtml(s.name || "—") + "</strong>"
+      +       claudeName + briefDiv + "</td>"
+      +   (showClass ? "<td>" + ledgerClassBadge(s) + "</td>" : "")
+      +   "<td>" + ledgerModeBadge(s.dispatch_mode)
+      +     "<div class='path'>" + escapeHtml(lastRunTime) + "</div>"
+      +     lastRun + "</td>"
+      +   "<td class='mono'>" + runCounts + "</td>"
+      +   "<td>" + ledgerStatusBadge(s.status) + "</td>"
+      +   "<td>"
+      +     "<div>" + escapeHtml(s.project_name || "—") + "</div>"
+      +     (s.project_path
+              ? "<div class='path'>" + escapeHtml(s.project_path) + "</div>"
+              : "")
+      +   "</td>"
+      +   "<td class='mono'>" + escapeHtml((s.uuid || "").slice(0, 8)) + "</td>"
+      +   "<td class='mono'>" + escapeHtml(s.last_used_at || "—") + "</td>"
+      + "</tr>";
+  }
+  function filterLedgerRow(s, ft) {
+    const blob = [s.name, s.uuid, s.project_name, s.project_path,
+                  s.brief, s.last_run_name, s.claude_name,
+                  s.dispatch_mode, s.classification].join(" ").toLowerCase();
+    return blob.indexOf(ft) >= 0;
+  }
+
+  function renderHermes(filterText, statusFilter, modeFilter) {
     if (!data) return;
     const ft = (filterText || "").toLowerCase();
-    const sf = (stateFilter || "").trim();
+    const sf = (statusFilter || "").trim();
+    const mf = (modeFilter || "").trim();
     const rows = (data.hermes_sessions || []).filter(function(s) {
-      if (sf && s.state !== sf) return false;
+      if (sf && s.status !== sf) return false;
+      if (mf && s.dispatch_mode !== mf) return false;
       if (!ft) return true;
-      const blob = [s.name, s.profile_name, s.project_name, s.project_path,
-                    s.tmux_session, s.runtime, s.state].join(" ").toLowerCase();
-      return blob.indexOf(ft) >= 0;
+      return filterLedgerRow(s, ft);
     });
     const tbody = document.getElementById("t-hermes");
     if (!rows.length) {
-      tbody.innerHTML = emptyRow(8,
-        "Hermes 가 띄운 세션이 없습니다. `workerctl sessions start --profile X --project Y`");
+      const total = (data.hermes_sessions || []).length;
+      const msg = total === 0
+        ? "scv- prefix 가 붙은 세션이 없습니다. "
+          + "scripts/projects.py 의 _run_name() 이 새 dispatch 부터 prefix 를 붙입니다."
+        : "필터에 일치하는 세션이 없습니다.";
+      tbody.innerHTML = emptyRow(8, msg);
       return;
     }
     tbody.innerHTML = rows.map(function(s) {
-      const stateBadge = badgeForState(s.state);
-      const runtimeBadge = "<span class='badge " + (s.runtime === "tmux" ? "info" : "muted")
-        + " plain'>" + escapeHtml(s.runtime || "—") + "</span>";
-      return ""
-        + "<tr>"
-        +   "<td class='mono'>" + s.id + "</td>"
-        +   "<td><strong>" + escapeHtml(s.name) + "</strong></td>"
-        +   "<td>" + stateBadge + "</td>"
-        +   "<td>" + runtimeBadge + "</td>"
-        +   "<td>" + escapeHtml(s.profile_name || "—") + "</td>"
-        +   "<td>"
-        +     "<div>" + escapeHtml(s.project_name || "—") + "</div>"
-        +     (s.project_path ? "<div class='path'>" + escapeHtml(s.project_path) + "</div>" : "")
-        +   "</td>"
-        +   "<td class='mono'>"
-        +     (s.tmux_session ? escapeHtml(s.tmux_session) : "<span class='path'>(no tmux)</span>")
-        +     (s.pid ? "<div class='path'>pid " + s.pid + "</div>" : "")
-        +   "</td>"
-        +   "<td class='mono'>" + escapeHtml(s.started_at || "—") + "</td>"
-        + "</tr>";
+      return ledgerRowHtml(s, { showClass: false });
     }).join("");
   }
 
-  function renderNative(filterText) {
+  function renderNative(filterText, classFilter, statusFilter) {
     if (!data) return;
     const ft = (filterText || "").toLowerCase();
+    const cf = (classFilter || "").trim();
+    const sf = (statusFilter || "").trim();
+
     const noticeEl = document.getElementById("native-notice");
     if (data.native_note) {
       noticeEl.innerHTML = "<div class='notice'>" + escapeHtml(data.native_note) + "</div>";
@@ -702,36 +946,96 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       noticeEl.innerHTML = "";
     }
     setText("native-root", data.native_root || "—");
+
     const rows = (data.native_sessions || []).filter(function(s) {
+      if (cf && s.classification !== cf) return false;
+      if (sf && s.status !== sf) return false;
       if (!ft) return true;
-      const blob = [s.session_id, s.project_path_guess, s.project_dir_name,
-                    s.permission_mode, s.jsonl_path].join(" ").toLowerCase();
-      return blob.indexOf(ft) >= 0;
+      return filterLedgerRow(s, ft);
     });
     const tbody = document.getElementById("t-native");
     if (!rows.length) {
-      tbody.innerHTML = emptyRow(6,
-        data.native_root_exists
-          ? "해당하는 native 세션이 없습니다."
-          : "native 세션 디렉토리가 없거나 비어 있습니다.");
+      tbody.innerHTML = emptyRow(9,
+        "scv- prefix 가 없는 세션이 없습니다. "
+        + "(scripts/projects.py session sync-native --auto-register-projects 로 임포트 가능)");
       return;
     }
     tbody.innerHTML = rows.map(function(s) {
-      const pmodeBadge = s.permission_mode
-        ? "<span class='badge " + (s.permission_mode === "auto" ? "accent" : "warn")
-            + " plain'>" + escapeHtml(s.permission_mode) + "</span>"
-        : "<span class='badge muted plain'>—</span>";
+      return ledgerRowHtml(s, { showClass: true });
+    }).join("");
+  }
+
+  function renderHermesAgent(filterText, spawnFilter) {
+    if (!data) return;
+    const ft = (filterText || "").toLowerCase();
+    const sf = (spawnFilter || "").trim();
+    const rows = (data.hermes_agent_sessions || []).filter(function(r) {
+      if (sf === "with_spawn" && !r.spawned_count) return false;
+      if (sf === "no_spawn"   && r.spawned_count)  return false;
+      if (!ft) return true;
+      const childUuids = (r.spawned_claudes || [])
+        .map(function(c) { return (c.claude_uuid || "") + " " + (c.claude_name || ""); })
+        .join(" ");
+      const blob = [r.hermes_session_id, r.profile_name, r.discovered_via, childUuids]
+        .join(" ").toLowerCase();
+      return blob.indexOf(ft) >= 0;
+    });
+    const tbody = document.getElementById("t-hermes-agent");
+    if (!rows.length) {
+      tbody.innerHTML = emptyRow(6,
+        "discoverable hermes session 이 없습니다.");
+      return;
+    }
+    function viaBadge(v) {
+      const m = {
+        "transcript+runs":  { txt: "transcript + runs", cls: "accent" },
+        "transcript_only":  { txt: "transcript only",   cls: "muted" },
+        "runs_only":        { txt: "runs only (orphan)", cls: "danger" }
+      };
+      const o = m[v] || { txt: v || "—", cls: "muted" };
+      return "<span class='badge " + o.cls + " plain'>"
+             + escapeHtml(o.txt) + "</span>";
+    }
+    function transcriptCell(r) {
+      if (!r.transcript) return "<span class='path'>(file not found)</span>";
+      // file:/// URL — browsers may block local file links, but pasting/
+      // right-click-copy still works. We also expose a "open dir" link.
+      const fileUrl = "file:///" + r.transcript.replace(/\\\\/g, "/");
+      const sizeKb = r.transcript_size
+        ? "<span class='path'>" + (r.transcript_size / 1024).toFixed(1) + " KB</span>"
+        : "";
+      return "<a href='" + escapeHtml(fileUrl) + "' target='_blank'"
+           + " title='" + escapeHtml(r.transcript) + "'>"
+           + "📄 transcript</a> "
+           + sizeKb;
+    }
+    function spawnList(r) {
+      if (!r.spawned_count) return "<span class='path'>—</span>";
+      // Each child claude uuid is clickable → jumps to the Hermes 스폰 tab
+      // (or Native tab if it isn't a-ok-spawned) with the search input
+      // pre-filled to the uuid so the user lands on the right row.
+      const chips = (r.spawned_claudes || []).map(function(c) {
+        const uuid8 = (c.claude_uuid || "").slice(0, 8);
+        const label = (c.claude_name || uuid8 || "—");
+        return "<a href='#' class='spawn-chip' "
+             + "data-spawn-uuid='" + escapeHtml(c.claude_uuid || "") + "' "
+             + "data-spawn-id='" + escapeHtml(String(c.claude_session_db_id || "")) + "' "
+             + "title='" + escapeHtml(c.claude_uuid || "") + "'>"
+             + "<span class='badge accent plain'>"
+             + escapeHtml(label.slice(0, 28))
+             + "</span></a>";
+      }).join(" ");
+      return chips;
+    }
+    tbody.innerHTML = rows.map(function(r) {
       return ""
         + "<tr>"
-        +   "<td class='mono'>" + escapeHtml(s.session_id) + "</td>"
-        +   "<td>"
-        +     "<div>" + escapeHtml(s.project_path_guess) + "</div>"
-        +     "<div class='path'>" + escapeHtml(s.project_dir_name) + "</div>"
-        +   "</td>"
-        +   "<td>" + pmodeBadge + "</td>"
-        +   "<td class='mono'>" + (s.line_count != null ? s.line_count : "—") + "</td>"
-        +   "<td class='mono'>" + humanBytes(s.size_bytes) + "</td>"
-        +   "<td class='mono'>" + escapeHtml(s.modified_at || "—") + "</td>"
+        +   "<td class='mono'>" + escapeHtml(r.hermes_session_id) + "</td>"
+        +   "<td>" + escapeHtml(r.profile_name || "—") + "</td>"
+        +   "<td>" + viaBadge(r.discovered_via) + "</td>"
+        +   "<td>" + spawnList(r) + "</td>"
+        +   "<td>" + transcriptCell(r) + "</td>"
+        +   "<td class='mono'>" + escapeHtml(r.transcript_mtime || "—") + "</td>"
         + "</tr>";
     }).join("");
   }
@@ -783,20 +1087,76 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
 
   // --- filter wiring ---
   const workersSearch = document.querySelector("[data-filter='workers']");
-  workersSearch && workersSearch.addEventListener("input", function() {
-    renderWorkers(workersSearch.value);
-  });
+  const workersSrc    = document.querySelector("[data-filter-src='workers']");
+  function refreshWorkers() {
+    renderWorkers(
+      workersSearch ? workersSearch.value : "",
+      workersSrc    ? workersSrc.value    : ""
+    );
+  }
+  workersSearch && workersSearch.addEventListener("input",  refreshWorkers);
+  workersSrc    && workersSrc.addEventListener("change",   refreshWorkers);
 
   const hermesSearch = document.querySelector("[data-filter='hermes']");
-  const hermesState  = document.querySelector("[data-filter-state='hermes']");
-  function refreshHermes() { renderHermes(hermesSearch.value, hermesState.value); }
-  hermesSearch && hermesSearch.addEventListener("input", refreshHermes);
-  hermesState  && hermesState.addEventListener("change", refreshHermes);
+  const hermesStatus = document.querySelector("[data-filter-status='hermes']");
+  const hermesMode   = document.querySelector("[data-filter-mode='hermes']");
+  function refreshHermes() {
+    renderHermes(
+      hermesSearch ? hermesSearch.value : "",
+      hermesStatus ? hermesStatus.value : "",
+      hermesMode   ? hermesMode.value   : ""
+    );
+  }
+  hermesSearch && hermesSearch.addEventListener("input",  refreshHermes);
+  hermesStatus && hermesStatus.addEventListener("change", refreshHermes);
+  hermesMode   && hermesMode.addEventListener("change",   refreshHermes);
+
+  const hermesAgentSearch = document.querySelector("[data-filter='hermes-agent']");
+  const hermesAgentSpawn  = document.querySelector("[data-filter-spawn='hermes-agent']");
+  function refreshHermesAgent() {
+    renderHermesAgent(
+      hermesAgentSearch ? hermesAgentSearch.value : "",
+      hermesAgentSpawn  ? hermesAgentSpawn.value  : ""
+    );
+  }
+  hermesAgentSearch && hermesAgentSearch.addEventListener("input",  refreshHermesAgent);
+  hermesAgentSpawn  && hermesAgentSpawn.addEventListener("change",  refreshHermesAgent);
+
+  // Click on a spawn chip in the Hermes 세션 tab → jump to Hermes 스폰 tab
+  // (or Native if the row is non-spawn) and pre-fill the search filter with
+  // the claude uuid 8-char prefix so the right row lands at the top.
+  document.addEventListener("click", function(ev) {
+    const chip = ev.target && ev.target.closest && ev.target.closest(".spawn-chip");
+    if (!chip) return;
+    ev.preventDefault();
+    const uuid = chip.getAttribute("data-spawn-uuid") || "";
+    const u8 = uuid.slice(0, 8);
+    if (!u8) return;
+    // Decide target tab: scan both lists.
+    const inSpawn  = (data.hermes_sessions || []).some(function(s) { return s.uuid === uuid; });
+    const targetTab = inSpawn ? "hermes" : "native";
+    const tabBtn = document.querySelector(".tab[data-target='" + targetTab + "']");
+    if (tabBtn) tabBtn.click();
+    if (targetTab === "hermes") {
+      if (hermesSearch) { hermesSearch.value = u8; refreshHermes(); }
+    } else {
+      if (nativeSearch) { nativeSearch.value = u8; refreshNative(); }
+    }
+  });
 
   const nativeSearch = document.querySelector("[data-filter='native']");
-  nativeSearch && nativeSearch.addEventListener("input", function() {
-    renderNative(nativeSearch.value);
-  });
+  const nativeClass  = document.querySelector("[data-filter-class='native']");
+  const nativeStatus = document.querySelector("[data-filter-status='native']");
+  function refreshNative() {
+    renderNative(
+      nativeSearch ? nativeSearch.value : "",
+      nativeClass  ? nativeClass.value  : "",
+      nativeStatus ? nativeStatus.value : ""
+    );
+  }
+  nativeSearch && nativeSearch.addEventListener("input",  refreshNative);
+  nativeClass  && nativeClass.addEventListener("change", refreshNative);
+  nativeStatus && nativeStatus.addEventListener("change", refreshNative);
 
   const projSearch = document.querySelector("[data-filter='projects']");
   const projRole   = document.querySelector("[data-filter-role='projects']");
@@ -809,12 +1169,10 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
   projGit    && projGit.addEventListener("change", refreshProjects);
 
   function repaintTables() {
-    renderWorkers(workersSearch ? workersSearch.value : "");
-    renderHermes(
-      hermesSearch ? hermesSearch.value : "",
-      hermesState ? hermesState.value : ""
-    );
-    renderNative(nativeSearch ? nativeSearch.value : "");
+    refreshWorkers();
+    refreshHermes();
+    refreshHermesAgent();
+    refreshNative();
     renderProjects(
       projSearch ? projSearch.value : "",
       projRole ? projRole.value : "",
