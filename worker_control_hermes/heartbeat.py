@@ -298,6 +298,21 @@ def _extract_first_user_text(jsonl_path: Path, max_chars: int = 140) -> str:
 # ---------------------------------------------------------------------------
 
 def classify_sessions(window_min: int) -> dict:
+    # Heartbeat tick — also a good moment to refresh the legacy-parity
+    # tables (hermes_agent_sessions + child rows). Mtime-keyed skip keeps
+    # this cheap when transcripts haven't moved. Failures are non-fatal:
+    # the heartbeat must keep producing its Slack summary even if the
+    # parity ingestion hits an unexpected jsonl shape.
+    try:
+        from worker_control_hermes.legacy_parity_ingest import ingest_all as _parity_ingest
+        _conn = sqlite3.connect(DB_PATH)
+        _conn.row_factory = sqlite3.Row
+        _parity_stats = _parity_ingest(_conn)
+        _conn.close()
+        print(f"[parity-ingest] {_parity_stats}", file=sys.stderr)
+    except Exception as e:
+        print(f"[parity-ingest] failed: {e!r}", file=sys.stderr)
+
     sessions = _load_db_sessions()
     jsonl = _jsonl_lookup()
     db_uuids = {s["uuid"].lower() for s in sessions}

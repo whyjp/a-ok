@@ -27,6 +27,9 @@ data/
 /dashboard.html
 .playwright-mcp/
 
+# Generated HTML reports (legacy-parity dashboard export target).
+artifacts/
+
 # OS
 Thumbs.db
 .DS_Store

@@ -307,6 +307,77 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
   display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 10px; margin-bottom: 18px;
 }
+
+/* ── legacy-parity recap card (mirrors sites/1143 report) ─────────────── */
+.recap {
+  margin-top: 10px;
+  padding: 10px 12px 10px 14px;
+  background: linear-gradient(90deg, rgba(167,139,250,.12), rgba(167,139,250,.03));
+  border-left: 3px solid #a78bfa;
+  border-radius: 0 8px 8px 0;
+}
+.recap-header {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px; padding-bottom: 6px;
+  border-bottom: 1px dashed rgba(167,139,250,.2);
+}
+.recap-header .glyph { font-size: 14px; color: #a78bfa; font-weight: 700; }
+.recap-header .title {
+  color: #ddd6fe; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1px;
+}
+.recap-header .oneline {
+  flex: 1; color: var(--text-0); font-size: 11.5px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.recap .native-recap {
+  color: var(--text-0); font-size: 12px; line-height: 1.55;
+  padding: 6px 0 10px;
+  border-bottom: 1px dashed rgba(167,139,250,.2);
+  margin-bottom: 8px; white-space: pre-wrap; word-break: break-word;
+}
+.recap .native-recap .more { color: var(--text-2); font-size: 10.5px; display: block; margin-top: 2px; }
+.recap-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; align-items: start; }
+.recap .lbl {
+  justify-self: start;
+  padding: 2px 8px; border-radius: 10px;
+  background: rgba(167,139,250,.25); color: #ddd6fe;
+  font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .5px;
+  line-height: 1.4; white-space: nowrap;
+}
+.recap .lbl.warn { background: rgba(255,176,102,.25); color: #fde68a; }
+.recap .lbl.pr   { background: rgba(126,182,255,.25); color: #bfdbfe; }
+.recap .val {
+  color: var(--text-0); font-size: 11.5px; line-height: 1.5;
+  word-break: break-word; min-width: 0;
+}
+.recap .val.muted   { color: var(--text-2); }
+.recap .val.pending { color: var(--warn); }
+.recap .val.files   { font-family: var(--mono); font-size: 10.5px; color: #c7d2fe; }
+.recap .val a {
+  color: #93c5fd; text-decoration: none;
+  font-family: var(--mono); font-size: 11px;
+}
+.recap .val a:hover { text-decoration: underline; }
+.recap .val code {
+  background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; color: #a78bfa; margin-right: 3px;
+  font-family: var(--mono);
+}
+.recap .val .more { color: var(--text-2); font-size: 10.5px; margin-left: 4px; }
+
+.tag {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .3px;
+  text-transform: uppercase;
+}
+.tag.native  { background: rgba(126,182,255,.18); color: #93c5fd; border: 1px solid rgba(126,182,255,.35); }
+.tag.spawned { background: rgba(167,139,250,.18); color: #c4b5fd; border: 1px solid rgba(167,139,250,.35); }
+.tag.hermes  { background: rgba(124,242,195,.18); color: #6ee7b7; border: 1px solid rgba(124,242,195,.35); }
+
+.msg-counts { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+.msg-counts .total { color: var(--text-0); }
 .root-card {
   background: var(--bg-1);
   border: 1px solid var(--line);
@@ -680,7 +751,19 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
         cls: "", hint: "turn-by-turn transcript" },
       { label: "spawn 보유",    value: c.hermes_agent_with_spawn || 0,
         cls: (c.hermes_agent_with_spawn ? "accent" : ""),
-        hint: "claude 자식 spawn 한 hermes 세션" }
+        hint: "claude 자식 spawn 한 hermes 세션" },
+      // legacy-parity 카운터 — sites/1143 report 와 동일 4종.
+      { label: "PR/MR 링크",   value: c.sessions_with_pr || 0,
+        cls: (c.sessions_with_pr ? "info" : ""),
+        hint: "transcript 에서 PR URL 발견된 세션" },
+      { label: "큐 대기",       value: c.sessions_with_pending || 0,
+        cls: (c.sessions_with_pending ? "warn" : ""),
+        hint: "응답 없는 user 메시지 보유" },
+      { label: "claude /recap", value: c.sessions_with_recap || 0,
+        cls: (c.sessions_with_recap ? "accent" : ""),
+        hint: "claude /recap 응답 캡처됨" },
+      { label: "files touched", value: c.sessions_with_files || 0,
+        cls: "", hint: "Edit/Write/Read 흔적 보유" }
     ];
     const sumEl = document.getElementById("summary");
     if (sumEl) {
@@ -831,6 +914,153 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     }).join("");
   }
 
+  // ── legacy-parity recap card ──────────────────────────────────────────
+  // Mirrors the inline recap card from worker_control_hermes/legacy_parity_
+  // _report.py so that every session row across all three session tabs gets
+  // the same rich snapshot (PR links, files touched, recent tools, pending
+  // queue, last user/assistant excerpts, claude /recap content).
+  function recapCardHtml(s) {
+    if (!s) return "";
+    const pending = s.pending_queue || [];
+    const prs     = s.pr_links || [];
+    const files   = s.files_touched || [];
+    const tools   = s.tools_recent || [];
+    const nativeRecaps = s.recap_native || [];
+    const lastUser = s.last_user_text || "";
+    const lastAsst = s.last_assistant_text || "";
+    const cells = [];
+    function push(lblText, lblCls, valHtml, valCls) {
+      const lc = lblCls ? (" " + lblCls) : "";
+      const vc = valCls ? (" " + valCls) : "";
+      cells.push("<span class='lbl" + lc + "'>" + escapeHtml(lblText) + "</span>"
+        + "<div class='val" + vc + "'>" + valHtml + "</div>");
+    }
+    if (s.ai_title) push("title", "", escapeHtml(s.ai_title));
+    if (pending.length) {
+      const head = pending[0];
+      const headTxt = (typeof head === "string") ? head : (head && head.text) || "";
+      const more = pending.length > 1
+        ? "<span class='more'>+" + (pending.length - 1) + "</span>" : "";
+      push("queued", "warn", escapeHtml(headTxt) + more, "pending");
+    }
+    if (prs.length) {
+      const html = prs.slice(-3).map(function(p) {
+        const label = p.num ? "#" + escapeHtml(String(p.num))
+                            : escapeHtml((p.url || "").split("/").pop());
+        return "<a href='" + escapeHtml(p.url || "") + "' target='_blank' "
+             + "rel='noopener'>" + label + "</a>";
+      }).join(" · ");
+      push("pr/mr", "pr", html);
+    }
+    if (lastUser && lastUser !== s.first_user_text) {
+      push("last ask", "", escapeHtml(lastUser.slice(0, 240))
+        + (lastUser.length > 240 ? "…" : ""));
+    }
+    if (lastAsst) {
+      push("last say", "", escapeHtml(lastAsst.slice(0, 240))
+        + (lastAsst.length > 240 ? "…" : ""), "muted");
+    }
+    if (files.length) {
+      const shown = files.slice(0, 5).map(function(f) {
+        return escapeHtml(f.split(/[\\/]/).pop());
+      }).join(" · ");
+      const more = files.length > 5
+        ? "<span class='more'>+" + (files.length - 5) + " more</span>" : "";
+      push("files", "", shown + " " + more, "files");
+    }
+    if (tools.length) {
+      const html = tools.slice(0, 5).map(function(t) {
+        const snip = t.snippet
+          ? (" " + escapeHtml(t.snippet.slice(0, 60))
+             + (t.snippet.length > 60 ? "…" : ""))
+          : "";
+        return "<code>" + escapeHtml(t.name) + "</code>"
+             + "<span style='color:var(--text-3);font-size:10px'>"
+             + snip + "</span>";
+      }).join(" ");
+      push("tools", "", html);
+    }
+    if (!cells.length && !nativeRecaps.length) return "";
+
+    let oneliner = "";
+    let nativeBlock = "";
+    if (nativeRecaps.length) {
+      const latest = nativeRecaps[0].content || "";
+      const firstLine = (latest.split(/\r?\n/)[0] || latest);
+      oneliner = firstLine.slice(0, 140) + (firstLine.length > 140 ? "…" : "");
+      const olderCount = nativeRecaps.length - 1;
+      nativeBlock = "<div class='native-recap'>" + escapeHtml(latest)
+        + (olderCount > 0
+            ? "<span class='more'>+" + olderCount + " earlier recap"
+              + (olderCount > 1 ? "s" : "") + "</span>"
+            : "")
+        + "</div>";
+    } else if (pending.length) {
+      const head = pending[0];
+      const headTxt = (typeof head === "string") ? head : (head && head.text) || "";
+      oneliner = "🟡 queued: " + headTxt.slice(0, 70) + (headTxt.length > 70 ? "…" : "");
+    } else if (prs.length) {
+      const p = prs[prs.length - 1];
+      oneliner = "🔀 " + (p.num ? "#" + p.num : "")
+        + " open" + (prs.length > 1 ? " (+" + (prs.length - 1) + ")" : "");
+    } else if (lastUser && lastUser !== s.first_user_text) {
+      oneliner = "↳ " + lastUser.slice(0, 80) + (lastUser.length > 80 ? "…" : "");
+    } else if (s.ai_title) {
+      oneliner = s.ai_title;
+    } else if (lastAsst) {
+      oneliner = "✓ " + lastAsst.slice(0, 80) + (lastAsst.length > 80 ? "…" : "");
+    }
+    const sourceTag = nativeRecaps.length
+      ? "<span class='lbl pr' style='margin-left:auto'>claude</span>"
+      : "<span class='lbl' style='margin-left:auto;"
+        + "background:rgba(148,163,184,.18);color:#cbd5e1'>derived</span>";
+    return "<div class='recap'>"
+      + "<div class='recap-header'>"
+      + "<span class='glyph'>※</span>"
+      + "<span class='title'>recap</span>"
+      + "<span class='oneline'>" + escapeHtml(oneliner) + "</span>"
+      + sourceTag
+      + "</div>"
+      + nativeBlock
+      + (cells.length ? "<div class='recap-grid'>" + cells.join("") + "</div>" : "")
+      + "</div>";
+  }
+
+  // Extra context line (msg counts + git branch + claude version) — slides
+  // above the recap card. Kept tight so it doesn't push the table layout.
+  function parityMetaHtml(s) {
+    if (!s) return "";
+    const parts = [];
+    const total = (s.msg_user || 0) + (s.msg_assistant || 0);
+    if (total || s.msg_tool) {
+      parts.push("<span class='msg-counts'>"
+        + "<span class='total'>" + total + "</span>"
+        + " msgs (u" + (s.msg_user || 0)
+        + "/a" + (s.msg_assistant || 0)
+        + "/t" + (s.msg_tool || 0) + ")</span>");
+    }
+    if (s.git_branch)     parts.push("<span class='msg-counts'>⎇ " + escapeHtml(s.git_branch) + "</span>");
+    if (s.claude_version) parts.push("<span class='msg-counts'>v" + escapeHtml(s.claude_version) + "</span>");
+    if (!parts.length) return "";
+    return "<div style='margin-top:4px;display:flex;gap:10px;flex-wrap:wrap'>" + parts.join("") + "</div>";
+  }
+
+  // Make the legacy-report parity rich text searchable in the ledger filter,
+  // so a user typing a PR number, a filename, or a recap keyword still hits.
+  function parityHaystack(s) {
+    const prUrls = (s.pr_links || []).map(function(p) { return p.url || ""; });
+    const files  = (s.files_touched || []);
+    const tools  = (s.tools_recent || []).map(function(t) { return t.name; });
+    const pend   = (s.pending_queue || []).map(function(p) {
+      return (typeof p === "string") ? p : (p && p.text) || "";
+    });
+    const recaps = (s.recap_native || []).map(function(r) { return r.content || ""; });
+    return [s.ai_title, s.summary, s.first_user_text, s.last_user_text,
+            s.last_assistant_text, s.git_branch, s.claude_version]
+      .concat(prUrls, files, tools, pend, recaps)
+      .filter(Boolean).join(" ").toLowerCase();
+  }
+
   // ── 공통 ledger-row 렌더링 (Hermes 스폰 / Native 양쪽이 같은 스키마) ──
   // 백엔드는 단일 hermes_sessions ledger 를 `scv-` prefix 로 두 분할해서
   // 각각 `data.hermes_sessions` / `data.native_sessions` 로 내려준다. 두
@@ -882,11 +1112,13 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     const briefDiv = s.brief
       ? "<div class='path'>" + escapeHtml((s.brief || "").slice(0, 120)) + "</div>"
       : "";
+    const recap = recapCardHtml(s);
+    const meta  = parityMetaHtml(s);
     return ""
       + "<tr>"
       +   "<td class='mono'>" + s.id + "</td>"
       +   "<td><strong>" + escapeHtml(s.name || "—") + "</strong>"
-      +       claudeName + briefDiv + "</td>"
+      +       claudeName + briefDiv + meta + recap + "</td>"
       +   (showClass ? "<td>" + ledgerClassBadge(s) + "</td>" : "")
       +   "<td>" + ledgerModeBadge(s.dispatch_mode)
       +     "<div class='path'>" + escapeHtml(lastRunTime) + "</div>"
@@ -904,10 +1136,11 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       + "</tr>";
   }
   function filterLedgerRow(s, ft) {
-    const blob = [s.name, s.uuid, s.project_name, s.project_path,
+    const base = [s.name, s.uuid, s.project_name, s.project_path,
                   s.brief, s.last_run_name, s.claude_name,
                   s.dispatch_mode, s.classification].join(" ").toLowerCase();
-    return blob.indexOf(ft) >= 0;
+    if (base.indexOf(ft) >= 0) return true;
+    return parityHaystack(s).indexOf(ft) >= 0;
   }
 
   function renderHermes(filterText, statusFilter, modeFilter) {
@@ -983,7 +1216,8 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
                     r.first_message, r.last_message, r.model, r.cwd,
                     childUuids]
         .join(" ").toLowerCase();
-      return blob.indexOf(ft) >= 0;
+      if (blob.indexOf(ft) >= 0) return true;
+      return parityHaystack(r).indexOf(ft) >= 0;
     });
     const tbody = document.getElementById("t-hermes-agent");
     if (!rows.length) {
@@ -1037,6 +1271,8 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       const firstMsg = r.first_message
         ? "<div class='path'>" + escapeHtml((r.first_message || "").slice(0, 200)) + "</div>"
         : "<span class='path'>—</span>";
+      const recap = recapCardHtml(r);
+      const meta  = parityMetaHtml(r);
       const turnsCell = r.turn_count != null
         ? "<span class='mono'>" + r.turn_count + "</span>"
         : "<span class='path'>—</span>";
@@ -1048,7 +1284,7 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
         +   "<td class='mono'>" + escapeHtml(r.hermes_session_id) + "</td>"
         +   "<td>" + escapeHtml(r.profile_name || "—")
         +     "<div class='path'>" + viaBadge(r.discovered_via) + "</div></td>"
-        +   "<td>" + firstMsg + "</td>"
+        +   "<td>" + firstMsg + meta + recap + "</td>"
         +   "<td>" + turnsCell + "</td>"
         +   "<td>" + modelCell + "</td>"
         +   "<td>" + spawnList(r) + "</td>"
