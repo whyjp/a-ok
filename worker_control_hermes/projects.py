@@ -431,7 +431,7 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         # Record the inaugural run.
         run_name = _run_name(base_name, 1)
         mode = "print" if args.print else "interactive"
-        cmd = _build_claude_command(
+        raw_cmd = _build_claude_command(
             cwd=proj["folder_path"],
             uid=uid,
             name=run_name,
@@ -446,9 +446,20 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         conn.execute(
             "INSERT INTO hermes_runs(session_id, run_index, name, mode, command, status, started_at, hermes_session_id) "
             "VALUES (?, ?, ?, ?, ?, 'started', ?, ?)",
-            (sess_id, 1, run_name, mode, cmd, now, _HERMES_SESSION_ID),
+            (sess_id, 1, run_name, mode, raw_cmd, now, _HERMES_SESSION_ID),
         )
         run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # Wrap the emitted command so it auto-calls `run end` on exit.
+        # Stored under hermes_runs.command so the dashboard / audit shows
+        # exactly what was emitted to the PM agent. ``--no-auto-close``
+        # opts back into the legacy raw form.
+        auto_close = not getattr(args, "no_auto_close", False)
+        cmd = _wrap_self_close(raw_cmd, run_id) if auto_close else raw_cmd
+        if auto_close:
+            conn.execute(
+                "UPDATE hermes_runs SET command=? WHERE id=?",
+                (cmd, run_id),
+            )
         # The brand-new session is now eligible for `spawned` classification
         # if this first run is print-mode. Reclassify once.
         _reclassify_origins(conn)
@@ -462,6 +473,8 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         "run_name": run_name,
         "mode": mode,
         "command": cmd,
+        "command_raw": raw_cmd,
+        "auto_close": auto_close,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -469,9 +482,45 @@ def cmd_session_start(args: argparse.Namespace) -> None:
     print(f"session uuid : {uid}")
     print(f"session name : {base_name}")
     print(f"project      : {proj['folder_path']}")
-    print(f"run #{run_id} (idx 1, mode={mode})")
+    print(f"run #{run_id} (idx 1, mode={mode}, auto_close={'on' if auto_close else 'off'})")
     print(f"  --name     : {run_name}")
     print(f"  command    : {cmd}")
+
+
+def _wrap_self_close(raw_cmd: str, run_id: int) -> str:
+    """Wrap ``raw_cmd`` in a bash subshell that calls ``run end`` on exit.
+
+    The wrapper is bash-only (git-bash / MSYS on Windows, regular bash on
+    POSIX). On Windows cmd.exe / PowerShell it will not parse — this is
+    deliberate: the Hermes terminal tool runs commands through bash and
+    that is the supported surface.
+
+    Semantics:
+      * EXIT trap fires on normal exit AND signal-induced exit
+        (INT/TERM/HUP). SIGKILL is the only path that bypasses it, which
+        is exactly what the ``runs sweep`` safety net is for.
+      * ``$?`` is captured as the very first statement of the trap so
+        nothing else can clobber it.
+      * The outer subshell ``( … )`` scopes the trap to the wrapped
+        command — pasting this into an interactive shell will NOT leave
+        a stray EXIT trap behind in that shell.
+      * The wrapper's exit code IS the original claude exit code: bash
+        keeps the subshell's last-command rc and the EXIT trap does
+        not override it (no explicit ``exit`` inside the trap).
+      * The ``run end`` call is best-effort (``|| true``) so a missing
+        entry-point on PATH never masks the real exit code.
+    """
+    # Single-quoted trap body keeps every $… literal until the trap
+    # actually fires. The raw command lives OUTSIDE this quoted span,
+    # so its own shlex-quoted args (which use single quotes too) do
+    # not collide.
+    trap_body = (
+        "__rc=$?; "
+        f"workerctl-hermes-projects run end {run_id} "
+        "--status $( [ \"$__rc\" = \"0\" ] && echo done || echo failed ) "
+        "--note \"exit=$__rc\" >/dev/null 2>&1 || true"
+    )
+    return f"( trap '{trap_body}' EXIT; {raw_cmd} )"
 
 
 def _build_claude_command(*, cwd: str, uid: str, name: str,
@@ -923,7 +972,7 @@ def cmd_run_start(args: argparse.Namespace) -> None:
         run_name = _run_name(sess["name"], idx)
         mode = "print" if args.print else "interactive"
 
-        cmd = _build_claude_command(
+        raw_cmd = _build_claude_command(
             cwd=proj["folder_path"],
             uid=sess["uuid"],
             name=run_name,
@@ -940,15 +989,22 @@ def cmd_run_start(args: argparse.Namespace) -> None:
         conn.execute(
             "INSERT INTO hermes_runs(session_id, run_index, name, mode, command, status, started_at, hermes_session_id) "
             "VALUES (?, ?, ?, ?, ?, 'started', ?, ?)",
-            (sess["id"], idx, run_name, mode, cmd, now, _HERMES_SESSION_ID),
+            (sess["id"], idx, run_name, mode, raw_cmd, now, _HERMES_SESSION_ID),
         )
+        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        auto_close = not getattr(args, "no_auto_close", False)
+        cmd = _wrap_self_close(raw_cmd, run_id) if auto_close else raw_cmd
+        if auto_close:
+            conn.execute(
+                "UPDATE hermes_runs SET command=? WHERE id=?",
+                (cmd, run_id),
+            )
         # New run may promote this session to 'spawned' (e.g. first print run
         # after a chain of interactive ones). Idempotent.
         _reclassify_origins(conn)
         conn.execute(
             "UPDATE hermes_sessions SET last_used_at=? WHERE id=?", (now, sess["id"]),
         )
-        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     payload = {
         "run_id": run_id,
@@ -957,12 +1013,14 @@ def cmd_run_start(args: argparse.Namespace) -> None:
         "name": run_name,
         "project": proj["folder_path"],
         "command": cmd,
+        "command_raw": raw_cmd,
+        "auto_close": auto_close,
         "mode": mode,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
-    print(f"run #{run_id} (idx {idx}, mode={mode})")
+    print(f"run #{run_id} (idx {idx}, mode={mode}, auto_close={'on' if auto_close else 'off'})")
     print(f"  session  : {sess['uuid']}  ({sess['name']})")
     print(f"  --name   : {run_name}")
     print(f"  project  : {proj['folder_path']}")
@@ -1104,6 +1162,11 @@ def main() -> None:
     ss_start.add_argument("--allowed-tools",
                           help='value passed verbatim to claude --allowedTools '
                                '(e.g. "Read,Edit,Bash")')
+    ss_start.add_argument("--no-auto-close", action="store_true",
+                          help="emit the raw claude command without the bash "
+                               "self-close wrapper (legacy behavior; the PM "
+                               "agent must then call `run end` manually). "
+                               "Default: wrap so the run auto-closes on exit.")
     ss_start.add_argument("--json", action="store_true")
     ss_start.set_defaults(fn=cmd_session_start)
 
@@ -1169,6 +1232,9 @@ def main() -> None:
     rr_start.add_argument("--prompt")
     rr_start.add_argument("--max-turns", type=int)
     rr_start.add_argument("--allowed-tools")
+    rr_start.add_argument("--no-auto-close", action="store_true",
+                          help="emit the raw claude command without the bash "
+                               "self-close wrapper (legacy behavior).")
     rr_start.add_argument("--json", action="store_true")
     rr_start.set_defaults(fn=cmd_run_start)
 
