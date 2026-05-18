@@ -356,17 +356,17 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     <button class="tab" role="tab" data-target="workers" aria-selected="true">
       워커 프로파일 <span class="pill" id="c-workers">0</span>
     </button>
-    <button class="tab" role="tab" data-target="hermes">
-      Hermes 스폰 세션 <span class="pill" id="c-hermes">0</span>
-    </button>
     <button class="tab" role="tab" data-target="hermes-agent">
-      Hermes 세션 <span class="pill" id="c-hermes-agent">0</span>
+      hermes 세션 <span class="pill" id="c-hermes-agent">0</span>
+    </button>
+    <button class="tab" role="tab" data-target="hermes">
+      hermes 스폰 claude 세션 <span class="pill" id="c-hermes">0</span>
     </button>
     <button class="tab" role="tab" data-target="native">
-      Native 세션 <span class="pill" id="c-native">0</span>
+      native 세션 <span class="pill" id="c-native">0</span>
     </button>
     <button class="tab" role="tab" data-target="projects">
-      관리 대상 프로젝트 <span class="pill" id="c-projects">0</span>
+      관리대상 프로젝트 <span class="pill" id="c-projects">0</span>
     </button>
   </div>
 
@@ -407,15 +407,56 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
     </div>
   </section>
 
-  <!-- Hermes 스폰 세션 패널 (scv- prefix 가 붙은 ledger 행만) -->
+  <!-- hermes 세션 패널 (turn-by-turn hermes-agent 세션 + claude spawn 트리) -->
+  <section class="panel" id="p-hermes-agent" role="tabpanel">
+    <div class="panel-head">
+      <div>
+        <div class="panel-title">hermes 세션</div>
+        <div class="panel-desc">
+          <code>~/AppData/Local/hermes/profiles/&lt;name&gt;/sessions/session_*.json</code>
+          으로부터 동기화돼 <code>hermes_agent_sessions</code> 테이블에 영속화된
+          Hermes Agent 의 턴-바이-턴 세션. claude run 이 이 세션에서
+          발사된 경우 <code>hermes_runs.hermes_session_id</code> 링크로 자식
+          spawn 을 묶어 보여준다. FE 는 더 이상 디스크를 읽지 않으며 DB 가
+          유일한 출처다 — <code>workerctl sessions sync-hermes</code> 또는
+          BFF 의 60s 주기 워커가 동기화한다.
+        </div>
+      </div>
+      <div class="panel-tools">
+        <select class="select" data-filter-spawn="hermes-agent">
+          <option value="">모두</option>
+          <option value="with_spawn">claude spawn 있는 세션만</option>
+          <option value="no_spawn">spawn 없는 세션만</option>
+        </select>
+        <input class="search" type="search"
+               placeholder="session id / profile / 첫 메시지 / 자식 UUID 검색"
+               data-filter="hermes-agent" />
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>session id</th><th>profile</th>
+            <th>첫 메시지</th><th>turns</th><th>모델</th>
+            <th>spawned claude</th>
+            <th>transcript</th><th>mtime</th>
+          </tr>
+        </thead>
+        <tbody id="t-hermes-agent"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- hermes 스폰 claude 세션 패널 (a-ok: prefix 가 붙은 ledger 행만) -->
   <section class="panel" id="p-hermes" role="tabpanel">
     <div class="panel-head">
       <div>
-        <div class="panel-title">Hermes 스폰 세션</div>
+        <div class="panel-title">hermes 스폰 claude 세션</div>
         <div class="panel-desc">
-          단일 <code>hermes_sessions</code> ledger 중 <strong>run name 이
-          <code>a-ok:</code> prefix 로 시작하는 행</strong> 만 표시한다 — 즉
-          a-ok worker-control 디스패처(<code>scripts/projects.py::_run_name()</code>)
+          단일 <code>hermes_sessions</code> ledger 중 <strong>name 또는 마지막
+          run name 이 <code>a-ok:</code> prefix 로 시작하는 행</strong> 만 표시한다 —
+          즉 a-ok worker-control 디스패처(<code>scripts/projects.py::_run_name()</code>)
           가 발사한 claude 세션. claude <code>/rename</code> 으로도 이 prefix
           는 사라지지 않는다.
           <span class="path"><code>claude -p</code> 여부는 별도 컬럼으로만
@@ -452,44 +493,6 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
           </tr>
         </thead>
         <tbody id="t-hermes"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- Hermes 세션 패널 (turn-by-turn hermes-agent 세션 + claude spawn 트리) -->
-  <section class="panel" id="p-hermes-agent" role="tabpanel">
-    <div class="panel-head">
-      <div>
-        <div class="panel-title">Hermes 세션 (turn-by-turn)</div>
-        <div class="panel-desc">
-          <code>~/AppData/Local/hermes/profiles/&lt;name&gt;/sessions/session_*.json</code>
-          으로부터 디스커버한 Hermes Agent 의 턴-바이-턴 세션. claude run 이
-          이 세션에서 발사된 경우 <code>hermes_runs.hermes_session_id</code>
-          링크로 자식 spawn 을 묶어 보여준다. <strong>바로가기</strong> 컬럼의
-          transcript 링크를 클릭하면 OS 기본 앱이 JSON 을 연다.
-        </div>
-      </div>
-      <div class="panel-tools">
-        <select class="select" data-filter-spawn="hermes-agent">
-          <option value="">모두</option>
-          <option value="with_spawn">claude spawn 있는 세션만</option>
-          <option value="no_spawn">spawn 없는 세션만</option>
-        </select>
-        <input class="search" type="search"
-               placeholder="session id / profile / 자식 UUID 검색"
-               data-filter="hermes-agent" />
-      </div>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>session id</th><th>profile</th>
-            <th>discovered via</th><th>spawned claude</th>
-            <th>transcript</th><th>mtime</th>
-          </tr>
-        </thead>
-        <tbody id="t-hermes-agent"></tbody>
       </table>
     </div>
   </section>
@@ -976,14 +979,17 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       const childUuids = (r.spawned_claudes || [])
         .map(function(c) { return (c.claude_uuid || "") + " " + (c.claude_name || ""); })
         .join(" ");
-      const blob = [r.hermes_session_id, r.profile_name, r.discovered_via, childUuids]
+      const blob = [r.hermes_session_id, r.profile_name, r.discovered_via,
+                    r.first_message, r.last_message, r.model, r.cwd,
+                    childUuids]
         .join(" ").toLowerCase();
       return blob.indexOf(ft) >= 0;
     });
     const tbody = document.getElementById("t-hermes-agent");
     if (!rows.length) {
-      tbody.innerHTML = emptyRow(6,
-        "discoverable hermes session 이 없습니다.");
+      tbody.innerHTML = emptyRow(8,
+        "hermes 세션이 DB 에 없습니다. `workerctl sessions sync-hermes` 로 동기화하거나, "
+        + "BFF 의 60s 주기 sync 워커가 다음 사이클에 채우길 기다리세요.");
       return;
     }
     function viaBadge(v) {
@@ -1028,14 +1034,26 @@ tbody td.mono, thead th.mono { font-family: var(--mono); font-size: 12px; }
       return chips;
     }
     tbody.innerHTML = rows.map(function(r) {
+      const firstMsg = r.first_message
+        ? "<div class='path'>" + escapeHtml((r.first_message || "").slice(0, 200)) + "</div>"
+        : "<span class='path'>—</span>";
+      const turnsCell = r.turn_count != null
+        ? "<span class='mono'>" + r.turn_count + "</span>"
+        : "<span class='path'>—</span>";
+      const modelCell = r.model
+        ? "<span class='mono'>" + escapeHtml(r.model) + "</span>"
+        : "<span class='path'>—</span>";
       return ""
         + "<tr>"
         +   "<td class='mono'>" + escapeHtml(r.hermes_session_id) + "</td>"
-        +   "<td>" + escapeHtml(r.profile_name || "—") + "</td>"
-        +   "<td>" + viaBadge(r.discovered_via) + "</td>"
+        +   "<td>" + escapeHtml(r.profile_name || "—")
+        +     "<div class='path'>" + viaBadge(r.discovered_via) + "</div></td>"
+        +   "<td>" + firstMsg + "</td>"
+        +   "<td>" + turnsCell + "</td>"
+        +   "<td>" + modelCell + "</td>"
         +   "<td>" + spawnList(r) + "</td>"
         +   "<td>" + transcriptCell(r) + "</td>"
-        +   "<td class='mono'>" + escapeHtml(r.transcript_mtime || "—") + "</td>"
+        +   "<td class='mono'>" + escapeHtml(r.transcript_mtime || r.ended_at || "—") + "</td>"
         + "</tr>";
     }).join("");
   }

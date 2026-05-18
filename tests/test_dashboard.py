@@ -77,9 +77,9 @@ def test_render_html_contains_korean_labels_and_data(populated_db):
     assert html_text.startswith("<!DOCTYPE html>")
     assert "worker-control" in html_text
     assert "워커 프로파일" in html_text
-    assert "Hermes 스폰 세션" in html_text
+    assert "hermes 스폰 claude 세션" in html_text
     assert "Native Claude 세션" in html_text
-    assert "관리 대상 프로젝트" in html_text
+    assert "관리대상 프로젝트" in html_text
     # the JSON payload is embedded and parseable
     marker = '<script id="dashboard-data" type="application/json">'
     start = html_text.index(marker) + len(marker)
@@ -179,7 +179,7 @@ def test_static_dashboard_html_is_packaged_and_parseable():
     assert "api/snapshot" in text
     # 라벨이 살아 있는지
     assert "워커 프로파일" in text
-    assert "Hermes 스폰 세션" in text
+    assert "hermes 스폰 claude 세션" in text
 
 
 def test_render_html_replaces_inline_placeholder(populated_db):
