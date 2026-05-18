@@ -187,6 +187,56 @@ def test_session_view_to_dict_emits_agent_payload_when_present():
     assert row["recap_native"][0]["content"].startswith("first line")
 
 
+def test_hermes_session_panel_excludes_native_claude_rows(
+    populated_db, tmp_path: Path,
+):
+    """Post-split, ``_collect_hermes_session_panel`` reads only Hermes-profile
+    sessions (``hermes_agent_sessions`` table). Native claude rows live in
+    ``claude_session_parity`` and must not appear in the panel.
+    """
+    import sqlite3
+
+    from worker_control_hermes.legacy_parity_schema import (
+        apply_legacy_parity_schema, upsert_claude_parity_row,
+        upsert_session_row,
+    )
+
+    db_path = db.db_path()
+    conn = sqlite3.connect(str(db_path))
+    apply_legacy_parity_schema(conn)
+    # A native claude row — must NOT appear in the panel.
+    upsert_claude_parity_row(conn, {
+        "session_uuid": "abcdef12-3456-7890-abcd-ef0123456789",
+        "kind": "claude",
+        "transcript_path": str(Path.home() / ".claude" / "projects"
+                               / "fake" / "abcdef12-3456-7890-abcd-ef0123456789.jsonl"),
+        "synced_at": "2026-05-18T00:00:00Z",
+    })
+    # A real hermes-profile row — must appear with profile_name set.
+    upsert_session_row(conn, {
+        "hermes_session_id": "session_host_111_aaa",
+        "kind": "hermes",
+        "profile_name": "worker",
+        "profile_path": "/fake/profile",
+        "transcript_path": "/fake/profile/sessions/session_host_111_aaa.json",
+        "synced_at": "2026-05-18T00:00:00Z",
+    })
+    conn.commit()
+    conn.close()
+
+    rows, _ = dashboard._collect_hermes_session_panel([])
+    sids = {r["hermes_session_id"] for r in rows}
+    assert "abcdef12-3456-7890-abcd-ef0123456789" not in sids
+    assert "session_host_111_aaa" in sids
+    panel_row = next(
+        r for r in rows
+        if r["hermes_session_id"] == "session_host_111_aaa"
+    )
+    assert panel_row["profile_name"] == "worker"
+    # Every panel row must have a non-empty profile_name (Hermes-only invariant).
+    assert all(r["profile_name"] for r in rows)
+
+
 def test_write_dashboard_custom_path(populated_db, tmp_path: Path):
     target = tmp_path / "custom" / "view.html"
     out = dashboard.write_dashboard(output=target)

@@ -1,28 +1,37 @@
-"""Legacy-parity schema extension for hermes_agent_sessions.
+"""Legacy-parity schema for per-session metadata (two tables, one shape).
 
 Goal: bring the canonical worker-control SQLite store up to the field set
 that the legacy `sites/1143` report (`C:/Users/cxx/Downloads/index.html`)
-ships in its inline `DATA[]` JSON. Same fields, same depth, for BOTH
-claude-code sessions (jsonl-backed) and hermes-side transcript sessions —
-so the dashboard can show identical recap cards regardless of origin.
+ships in its inline `DATA[]` JSON. Same fields, same depth, but split by
+source kind so the dashboard's "hermes 세션" panel doesn't get polluted by
+native claude jsonls (the original single-table design folded both into
+``hermes_agent_sessions`` and broke that panel's semantics).
 
-Design decisions (single source of truth: hermes_agent_sessions)
-----------------------------------------------------------------
-* hermes_agent_sessions is repurposed as the unified per-session metadata
-  row. Its PRIMARY KEY column `hermes_session_id` continues to be a TEXT
-  identifier, but it now holds either:
-      kind='claude'  → the claude jsonl session UUID
-      kind='hermes'  → the hermes profile session id
-  This avoids a parallel table and keeps the dashboard JOIN logic single-
-  pathed. The two id namespaces don't collide (claude UUIDs follow the
-  8-4-4-4-12 hex pattern; hermes ids are `session_<host>_<ts>_<rand>`).
-* Heavy-cardinality fields (PR links, files, tools, recaps, queue) live in
-  separate child tables keyed by the session_uuid TEXT, with
-  ON DELETE CASCADE so removing a session row sweeps its derived data.
-  Each child table has a stable ord/path UNIQUE so the parser can
-  idempotently DELETE-then-INSERT inside a single transaction.
+Two tables, identical column shape modulo the PK and the columns that
+only apply to one side:
 
-Idempotent: re-running `apply_legacy_parity_schema(conn)` is safe.
+* ``hermes_agent_sessions`` — Hermes Agent turn-by-turn sessions sourced
+  from ``~/AppData/Local/hermes/profiles/<name>/sessions/session_*.json``.
+  PK is ``hermes_session_id`` (the hermes-side ``session_<host>_<ts>_<rand>``
+  identifier). Populated by ``worker_control.hermes_session_sync`` and the
+  Hermes branch of ``legacy_parity_ingest.ingest_all``.
+* ``claude_session_parity`` — native Claude code transcripts sourced from
+  ``~/.claude/projects/<encoded>/<uuid>.jsonl``. PK is ``session_uuid``
+  (the 8-4-4-4-12 claude UUID). Populated by the Claude branch of
+  ``legacy_parity_ingest.ingest_all``.
+
+Heavy-cardinality fields (PR links, files, tools, recaps, queue) live in
+shared child tables keyed by ``session_uuid`` — they don't care which
+source produced the parent row, just the identifier. Each child table has
+a stable ord/path UNIQUE so the parser can idempotently DELETE-then-INSERT
+inside a single transaction.
+
+Backward compat: the original design extended ``hermes_agent_sessions``
+with ``_EXTRA_COLUMNS`` (kind / git_branch / msg_* / …). We keep those
+ALTERs in place — the table itself still uses them for the Hermes-source
+rows. The ``claude_session_parity`` table is purely additive.
+
+Idempotent: re-running ``apply_legacy_parity_schema(conn)`` is safe.
 ALTER TABLE ADD COLUMN is guarded by PRAGMA table_info() so we don't error
 on re-apply. New tables use IF NOT EXISTS.
 """
@@ -69,6 +78,72 @@ _EXTRA_COLUMNS: list[tuple[str, str]] = [
 # ---------------------------------------------------------------------------
 # child tables (heavy-cardinality session attributes)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# claude_session_parity — native ~/.claude/projects/<uuid>.jsonl parity rows
+# ---------------------------------------------------------------------------
+#
+# Column shape mirrors hermes_agent_sessions + _EXTRA_COLUMNS so consumers
+# can pull either source through the same loader code (only the PK name
+# differs: session_uuid here, hermes_session_id there). ``profile_name``
+# and ``profile_path`` are intentionally absent — they don't apply to
+# native claude transcripts (those are hermes-profile concepts).
+
+_CLAUDE_PARITY_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS claude_session_parity (
+    session_uuid      TEXT PRIMARY KEY,
+    transcript_path   TEXT,
+    transcript_size   INTEGER NOT NULL DEFAULT 0,
+    transcript_mtime  TEXT,
+    started_at        TEXT,
+    ended_at          TEXT,
+    model             TEXT,
+    turn_count        INTEGER NOT NULL DEFAULT 0,
+    first_message     TEXT,
+    last_message      TEXT,
+    cwd               TEXT,
+    total_cost_usd    REAL,
+    synced_at         TEXT NOT NULL DEFAULT '',
+    -- legacy-parity extras (mirror _EXTRA_COLUMNS on hermes_agent_sessions)
+    kind              TEXT NOT NULL DEFAULT 'claude',
+    git_branch        TEXT,
+    claude_version    TEXT,
+    msg_user          INTEGER NOT NULL DEFAULT 0,
+    msg_assistant     INTEGER NOT NULL DEFAULT 0,
+    msg_tool          INTEGER NOT NULL DEFAULT 0,
+    ai_title          TEXT,
+    summary           TEXT,
+    first_user_text   TEXT,
+    last_user_text    TEXT,
+    last_assistant_text TEXT,
+    size_bytes        INTEGER,
+    spawn_slug        TEXT,
+    spawn_reason      TEXT,
+    is_spawned        INTEGER NOT NULL DEFAULT 0,
+    effective_status  TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_claude_session_parity_mtime
+    ON claude_session_parity(transcript_mtime DESC);
+"""
+
+
+# Column names for claude_session_parity (sans PK) — exposed so the
+# upsert helper can build INSERT statements without hard-coding the list.
+_CLAUDE_PARITY_COLS: tuple[str, ...] = (
+    "session_uuid",
+    "transcript_path", "transcript_size", "transcript_mtime",
+    "started_at", "ended_at", "model", "turn_count",
+    "first_message", "last_message", "cwd", "total_cost_usd",
+    "synced_at",
+    "kind", "git_branch", "claude_version",
+    "msg_user", "msg_assistant", "msg_tool",
+    "ai_title", "summary",
+    "first_user_text", "last_user_text", "last_assistant_text",
+    "size_bytes",
+    "spawn_slug", "spawn_reason", "is_spawned",
+    "effective_status",
+)
+
 
 _CHILD_TABLES_SQL = """
 -- PR / MR URLs detected in transcript text.
@@ -194,14 +269,15 @@ def apply_legacy_parity_schema(conn: sqlite3.Connection) -> dict[str, list[str]]
         conn.execute(f"ALTER TABLE hermes_agent_sessions ADD COLUMN {col} {decl}")
         audit["columns_added"].append(col)
 
-    # New child tables — track which ones the migration actually created
-    # by snapshotting the master table before/after.
+    # New child tables + claude_session_parity — track which ones the
+    # migration actually created by snapshotting the master table before/after.
     before = {
         r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
     conn.executescript(_CHILD_TABLES_SQL)
+    conn.executescript(_CLAUDE_PARITY_TABLE_SQL)
     after = {
         r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -232,6 +308,39 @@ def upsert_session_row(conn: sqlite3.Connection, row: dict) -> None:
         f"ON CONFLICT(hermes_session_id) DO UPDATE SET {update_clause}"
     )
     conn.execute(sql, [row[c] for c in cols])
+
+
+def upsert_claude_parity_row(conn: sqlite3.Connection, row: dict) -> None:
+    """UPSERT one claude_session_parity row.
+
+    Accepts the same dict shape the parser produces for hermes_agent_sessions
+    (PK column ``hermes_session_id`` is renamed to ``session_uuid``;
+    ``profile_name``/``profile_path`` are silently dropped — they don't apply
+    to native claude transcripts).
+
+    Required keys: hermes_session_id OR session_uuid; synced_at.
+    """
+    payload = dict(row)
+    # Rename PK if caller handed us the hermes-style key.
+    if "session_uuid" not in payload and "hermes_session_id" in payload:
+        payload["session_uuid"] = payload.pop("hermes_session_id")
+    # Drop columns that don't exist on claude_session_parity.
+    payload.pop("profile_name", None)
+    payload.pop("profile_path", None)
+    # Filter to known columns so a stray key doesn't crash the INSERT.
+    cols = [c for c in payload.keys() if c in _CLAUDE_PARITY_COLS]
+    if "session_uuid" not in cols:
+        raise ValueError("upsert_claude_parity_row requires session_uuid")
+    placeholders = ", ".join("?" for _ in cols)
+    col_list = ", ".join(cols)
+    update_clause = ", ".join(
+        f"{c}=excluded.{c}" for c in cols if c != "session_uuid"
+    )
+    sql = (
+        f"INSERT INTO claude_session_parity({col_list}) VALUES ({placeholders}) "
+        f"ON CONFLICT(session_uuid) DO UPDATE SET {update_clause}"
+    )
+    conn.execute(sql, [payload[c] for c in cols])
 
 
 def replace_child_rows(

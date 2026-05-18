@@ -144,6 +144,18 @@ def main() -> int:
         print(f"legacy-parity: +cols={parity_audit['columns_added']} "
               f"+tables={parity_audit['tables_added']}")
 
+    # Data migration — split native-claude parity rows out of the
+    # Hermes-only table. Idempotent: re-running is a no-op once the
+    # native rows have been moved.
+    from worker_control_hermes.migrations._2026_split_claude_parity import (
+        migrate as _split_claude_parity,
+    )
+    split_stats = _split_claude_parity(canon)
+    if split_stats["moved"]:
+        print(f"split-claude-parity: moved={split_stats['moved']} "
+              f"deleted={split_stats['deleted']} "
+              f"skipped={split_stats['skipped']}")
+
     old = sqlite3.connect(str(OLD))
     old.row_factory = sqlite3.Row
 

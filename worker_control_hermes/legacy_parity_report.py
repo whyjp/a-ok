@@ -25,40 +25,51 @@ from pathlib import Path
 from typing import Any
 
 
-# Shared SQL: same row shape for static export & live BFF.
+# Shared SQL: same row shape for static export & live BFF. After the
+# Hermes/Claude split, the legacy report unions both parity tables so the
+# DATA[] view stays comprehensive (Hermes-profile sessions live in
+# ``hermes_agent_sessions``; native claude transcripts in
+# ``claude_session_parity``).
 _SESSIONS_SQL = """
+WITH parity AS (
+  SELECT
+    s.hermes_session_id        AS session_id,
+    COALESCE(s.kind, 'hermes') AS kind,
+    s.profile_name,
+    s.profile_path,
+    s.transcript_path          AS jsonl_path,
+    s.transcript_size, s.transcript_mtime,
+    s.started_at, s.ended_at,
+    s.model AS worker_model, s.turn_count,
+    s.first_message, s.last_message, s.cwd, s.total_cost_usd, s.synced_at,
+    s.git_branch, s.claude_version AS version,
+    s.msg_user, s.msg_assistant, s.msg_tool,
+    s.ai_title, s.summary,
+    s.first_user_text, s.last_user_text, s.last_assistant_text,
+    s.size_bytes, s.spawn_slug, s.spawn_reason, s.is_spawned,
+    s.effective_status
+  FROM hermes_agent_sessions s
+  UNION ALL
+  SELECT
+    c.session_uuid             AS session_id,
+    COALESCE(c.kind, 'claude') AS kind,
+    NULL                       AS profile_name,
+    NULL                       AS profile_path,
+    c.transcript_path          AS jsonl_path,
+    c.transcript_size, c.transcript_mtime,
+    c.started_at, c.ended_at,
+    c.model AS worker_model, c.turn_count,
+    c.first_message, c.last_message, c.cwd, c.total_cost_usd, c.synced_at,
+    c.git_branch, c.claude_version AS version,
+    c.msg_user, c.msg_assistant, c.msg_tool,
+    c.ai_title, c.summary,
+    c.first_user_text, c.last_user_text, c.last_assistant_text,
+    c.size_bytes, c.spawn_slug, c.spawn_reason, c.is_spawned,
+    c.effective_status
+  FROM claude_session_parity c
+)
 SELECT
-  s.hermes_session_id        AS session_id,
-  COALESCE(s.kind, 'claude') AS kind,
-  s.profile_name,
-  s.profile_path,
-  s.transcript_path          AS jsonl_path,
-  s.transcript_size,
-  s.transcript_mtime,
-  s.started_at,
-  s.ended_at,
-  s.model                    AS worker_model,
-  s.turn_count,
-  s.first_message,
-  s.last_message,
-  s.cwd,
-  s.total_cost_usd,
-  s.synced_at,
-  s.git_branch,
-  s.claude_version           AS version,
-  s.msg_user,
-  s.msg_assistant,
-  s.msg_tool,
-  s.ai_title,
-  s.summary,
-  s.first_user_text,
-  s.last_user_text,
-  s.last_assistant_text,
-  s.size_bytes,
-  s.spawn_slug,
-  s.spawn_reason,
-  s.is_spawned,
-  s.effective_status,
+  s.*,
   COALESCE(hs.name, '')      AS worker_name,
   COALESCE(hs.brief, '')     AS worker_brief,
   COALESCE(hs.notes, '')     AS worker_notes,
@@ -68,51 +79,56 @@ SELECT
   p.name                     AS project_name,
   COALESCE(json_extract(p.metadata, '$.hermes.project_type'), '') AS project_type,
   COALESCE(json_extract(p.metadata, '$.hermes.git_repo'), p.remote_url) AS git_repo
-FROM hermes_agent_sessions s
-LEFT JOIN hermes_sessions hs ON LOWER(hs.uuid) = LOWER(s.hermes_session_id)
+FROM parity s
+LEFT JOIN hermes_sessions hs ON LOWER(hs.uuid) = LOWER(s.session_id)
 LEFT JOIN projects p ON p.id = hs.project_id
 ORDER BY COALESCE(s.transcript_mtime, s.started_at, '') DESC
 """
 
 
 _SESSIONS_SQL_STANDALONE = """
+WITH parity AS (
+  SELECT
+    s.hermes_session_id        AS session_id,
+    COALESCE(s.kind, 'hermes') AS kind,
+    s.profile_name, s.profile_path,
+    s.transcript_path          AS jsonl_path,
+    s.transcript_size, s.transcript_mtime,
+    s.started_at, s.ended_at,
+    s.model AS worker_model, s.turn_count,
+    s.first_message, s.last_message, s.cwd, s.total_cost_usd, s.synced_at,
+    s.git_branch, s.claude_version AS version,
+    s.msg_user, s.msg_assistant, s.msg_tool,
+    s.ai_title, s.summary,
+    s.first_user_text, s.last_user_text, s.last_assistant_text,
+    s.size_bytes, s.spawn_slug, s.spawn_reason, s.is_spawned,
+    s.effective_status
+  FROM hermes_agent_sessions s
+  UNION ALL
+  SELECT
+    c.session_uuid             AS session_id,
+    COALESCE(c.kind, 'claude') AS kind,
+    NULL AS profile_name, NULL AS profile_path,
+    c.transcript_path          AS jsonl_path,
+    c.transcript_size, c.transcript_mtime,
+    c.started_at, c.ended_at,
+    c.model AS worker_model, c.turn_count,
+    c.first_message, c.last_message, c.cwd, c.total_cost_usd, c.synced_at,
+    c.git_branch, c.claude_version AS version,
+    c.msg_user, c.msg_assistant, c.msg_tool,
+    c.ai_title, c.summary,
+    c.first_user_text, c.last_user_text, c.last_assistant_text,
+    c.size_bytes, c.spawn_slug, c.spawn_reason, c.is_spawned,
+    c.effective_status
+  FROM claude_session_parity c
+)
 SELECT
-  s.hermes_session_id        AS session_id,
-  COALESCE(s.kind, 'claude') AS kind,
-  s.profile_name,
-  s.profile_path,
-  s.transcript_path          AS jsonl_path,
-  s.transcript_size,
-  s.transcript_mtime,
-  s.started_at,
-  s.ended_at,
-  s.model                    AS worker_model,
-  s.turn_count,
-  s.first_message,
-  s.last_message,
-  s.cwd,
-  s.total_cost_usd,
-  s.synced_at,
-  s.git_branch,
-  s.claude_version           AS version,
-  s.msg_user,
-  s.msg_assistant,
-  s.msg_tool,
-  s.ai_title,
-  s.summary,
-  s.first_user_text,
-  s.last_user_text,
-  s.last_assistant_text,
-  s.size_bytes,
-  s.spawn_slug,
-  s.spawn_reason,
-  s.is_spawned,
-  s.effective_status,
+  s.*,
   '' AS worker_name, '' AS worker_brief, '' AS worker_notes,
   '' AS worker_perm, '' AS worker_status,
   NULL AS project_folder, NULL AS project_name,
   '' AS project_type, NULL AS git_repo
-FROM hermes_agent_sessions s
+FROM parity s
 ORDER BY COALESCE(s.transcript_mtime, s.started_at, '') DESC
 """
 
