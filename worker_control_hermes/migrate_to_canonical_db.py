@@ -135,6 +135,15 @@ def main() -> int:
     canon.execute("PRAGMA foreign_keys = ON")
     canon.executescript(EXTRA_SCHEMA)
 
+    # Legacy-parity schema (idempotent) — adds the columns/tables the
+    # dashboard needs to render claude/hermes sessions with the same
+    # depth as the legacy sites/1143 report.
+    from worker_control_hermes.legacy_parity_schema import apply_legacy_parity_schema
+    parity_audit = apply_legacy_parity_schema(canon)
+    if parity_audit["columns_added"] or parity_audit["tables_added"]:
+        print(f"legacy-parity: +cols={parity_audit['columns_added']} "
+              f"+tables={parity_audit['tables_added']}")
+
     old = sqlite3.connect(str(OLD))
     old.row_factory = sqlite3.Row
 

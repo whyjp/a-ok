@@ -31,6 +31,8 @@ workerctl-hermes-heartbeat  = "worker_control_hermes.heartbeat:main"
 workerctl-hermes-report     = "worker_control_hermes.build_report:main"
 workerctl-hermes-subprocs   = "worker_control_hermes.subprocs:main"
 workerctl-hermes-migrate    = "worker_control_hermes.migrate_to_canonical_db:main"
+workerctl-hermes-report-legacy = "worker_control_hermes.legacy_parity_report:main"
+workerctl-hermes-parity-ingest = "worker_control_hermes.legacy_parity_cli:ingest_cmd"
 
 [tool.setuptools]
 packages = ["worker_control", "worker_control_hermes"]
