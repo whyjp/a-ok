@@ -110,15 +110,33 @@ _PARITY_KEYS = (
 )
 
 
-def test_merge_parity_extras_fills_defaults_when_uuid_unknown():
-    """No matching extras row → every parity key gets a safe default.
+def test_session_view_to_dict_fills_parity_keys_when_agent_row_missing():
+    """No agent_session row → every parity key still appears on the FE dict.
 
     The dashboard FE assumes a stable row shape (every session row carries
-    the legacy-parity keys), so the merge helper MUST fill defaults even
-    when the parity ingest hasn't produced a row for this session.
+    the legacy-parity keys), so `_session_view_to_dict` MUST emit them all
+    even for a SessionView whose agent-side parity columns are NULL.
+
+    PR #5: the explicit ``_merge_parity_extras`` helper is gone — the
+    SessionView dataclass owns the defaults (msg_* = 0, is_spawned_agent =
+    False, child arrays = []), and ``_session_view_to_dict`` re-keys to
+    the FE's expected names (``size_bytes``, ``recap_native``).
     """
-    row = {"uuid": "no-such-uuid", "name": "X"}
-    dashboard._merge_parity_extras(row, {}, "no-such-uuid")
+    from worker_control.session_view import SessionView
+    v = SessionView(
+        id=1, uuid="no-such-uuid", name="X", status="active",
+        origin="native", model=None, permission_mode=None, brief=None,
+        notes=None, claude_name=None, claude_status=None,
+        claude_status_at=None, created_at="2026-05-18T00:00:00Z",
+        last_used_at="2026-05-18T00:00:00Z", ended_at=None,
+        classification="native", spawn_reason=None, dispatch_mode="—",
+        run_count=0, print_run_count=0, last_run_index=None,
+        last_run_name=None, last_run_mode=None, last_run_status=None,
+        last_run_started_at=None, last_run_ended_at=None,
+        project_id=None, project_name=None, project_path=None,
+        project_role=None,
+    )
+    row = dashboard._session_view_to_dict(v)
     for key in _PARITY_KEYS:
         assert key in row, f"missing default for {key!r}"
     assert row["pr_links"] == []
@@ -130,25 +148,32 @@ def test_merge_parity_extras_fills_defaults_when_uuid_unknown():
     assert row["is_spawned"] is False
 
 
-def test_merge_parity_extras_applies_child_arrays_when_present():
-    """Matching extras row → its child arrays + scalars land on the payload row."""
-    extras_map = {
-        "abc-uuid": {
-            **dashboard._EMPTY_PARITY_EXTRAS,
-            "git_branch": "main",
-            "claude_version": "2.1.141",
-            "msg_user": 21, "msg_assistant": 35, "msg_tool": 4,
-            "ai_title": "rich title",
-            "pr_links": [{"url": "https://x/p/1", "num": 1,
-                          "repo": "x/p", "kind": "github"}],
-            "files_touched": ["a.py", "b.py"],
-            "tools_recent": [{"name": "Bash", "snippet": "ls", "ts": None}],
-            "pending_queue": [{"text": "do it", "queued_at": None}],
-            "recap_native": [{"content": "first line\nbody", "ts": None}],
-        },
-    }
-    row = {"uuid": "ABC-UUID", "name": "Y"}
-    dashboard._merge_parity_extras(row, extras_map, row["uuid"])
+def test_session_view_to_dict_emits_agent_payload_when_present():
+    """Populated SessionView → parity scalars + child arrays land on the dict."""
+    from worker_control.session_view import SessionView
+    v = SessionView(
+        id=2, uuid="ABC-UUID", name="Y", status="active", origin="spawned",
+        model=None, permission_mode=None, brief=None, notes=None,
+        claude_name=None, claude_status=None, claude_status_at=None,
+        created_at="2026-05-18T00:00:00Z",
+        last_used_at="2026-05-18T00:00:00Z", ended_at=None,
+        classification="a_ok_spawned", spawn_reason="prefix:a-ok:",
+        dispatch_mode="print", run_count=1, print_run_count=1,
+        last_run_index=1, last_run_name="a-ok:hello", last_run_mode="print",
+        last_run_status="done", last_run_started_at=None,
+        last_run_ended_at=None,
+        project_id=None, project_name=None, project_path=None,
+        project_role=None,
+        agent_kind="claude", git_branch="main", claude_version="2.1.141",
+        msg_user=21, msg_assistant=35, msg_tool=4, ai_title="rich title",
+        pr_links=[{"url": "https://x/p/1", "num": 1,
+                   "repo": "x/p", "kind": "github"}],
+        files_touched=["a.py", "b.py"],
+        tools_recent=[{"name": "Bash", "snippet": "ls", "ts": None}],
+        pending_queue=[{"text": "do it", "queued_at": None}],
+        recaps=[{"content": "first line\nbody", "ts": None}],
+    )
+    row = dashboard._session_view_to_dict(v)
     assert row["git_branch"] == "main"
     assert row["claude_version"] == "2.1.141"
     assert row["msg_user"] == 21
