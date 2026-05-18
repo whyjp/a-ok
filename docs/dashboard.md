@@ -65,16 +65,27 @@ BFF 가 어떤 DB 를 읽는지 결정하는 우선순위:
 | `GET /api/snapshot`   | `DashboardSnapshot` 의 JSON 직렬화 (요청마다 SQLite 재조회) |
 | `GET /api/health`     | `{ ok, service, version, db_path, db_exists, runtime_root }` |
 
-JSON 페이로드는 다음 키를 포함한다:
+JSON 페이로드는 다음 키를 포함한다 (Phase 2 이후):
 
 - `generated_at`, `version`, `db_path`, `runtime_root`
 - `workspace_roots[]` — owned_work / public_reference 라벨과 정책
 - `profiles[]` — `worker_profiles` 행
 - `projects[]` — `projects` 행 + `policy` (work_capable / read_only)
-- `hermes_sessions[]` — `worker_sessions` 행 + profile/project 조인
-- `native_sessions[]` — `~/.claude/projects/` 디스커버리 결과
-- `native_root`, `native_root_exists`, `native_note`
-- `counters` — 9 종 요약치
+- `hermes_sessions[]` — **단일 ledger `hermes_sessions` 행** 을
+  `session_view.list_sessions()` 로 읽어 `a-ok:` prefix 가 붙은
+  *spawn* 분류 결과만 추려낸 것. 각 행에 legacy-parity 자식 테이블
+  (`pr_links`, `files_touched`, `tools_recent`, `recap_native`,
+  `pending_queue`) + `git_branch` / `msg_count` / `ai_title` 가
+  pre-join 된 채로 들어 있다.
+- `native_sessions[]` — 같은 ledger 의 나머지 (native) 분류. 화면
+  카드 구조는 동일.
+- `hermes_agent_sessions[]` — Hermes 자체 agent-session 패널 (다른
+  cardinality, `hermes_agent_sessions` 테이블에서 별도로 로드).
+- `native_root`, `native_root_exists`, `native_note` — `~/.claude/projects/`
+  디스커버리 메타 (행은 ledger 가 공급, 이 키는 root 경로만 노출).
+- `counters` — 13 종 요약치 (`hermes_spawned` / `hermes_native` /
+  `sessions_with_pr` / `sessions_with_pending` / `sessions_with_recap`
+  / `sessions_with_files` 등 parity meta 칩의 분모).
 
 ## FE 페이지 구성
 
@@ -93,17 +104,45 @@ JSON 페이로드는 다음 키를 포함한다:
 +-----------------------------------------------------------------+
 ```
 
-### 탭
+### 탭 (Phase 2 이후)
 
 | 탭 | 출처 |
 |----|------|
 | 워커 프로파일 | `worker_profiles` 테이블 |
-| Hermes 스폰 세션 | `worker_sessions` 테이블 (이 도구가 띄운 워커) |
-| Native Claude 세션 | `~/.claude/projects/<encoded-path>/<uuid>.jsonl` (read-only) |
+| Hermes 스폰 세션 | `hermes_sessions` (단일 ledger) WHERE 분류 = `a_ok_spawned` |
+| Native Claude 세션 | `hermes_sessions` (단일 ledger) WHERE 분류 ≠ `a_ok_spawned` |
 | 관리 대상 프로젝트 | `projects` 테이블 + 워크스페이스 정책 라벨 |
+
+두 세션 탭은 **같은 SQLite 행** 을 `a-ok:` prefix 로 분할한 결과다. 디스크
+재스캔이 아니라 `session_view.list_sessions()` 한 번의 호출이 모든 카드를
+공급한다.
 
 상태/역할 색상은 기존과 동일 (`running`/`working` → accent, `failed`/`killed`
 → danger 등).
+
+#### 카드 구성 (Phase 2 parity meta 포함)
+
+각 세션 카드의 데이터 출처 (FE 가 `hermes_sessions[i]` 의 키를 그대로 본다):
+
+| 화면 요소 | JSON 키 | 공급 위치 |
+|-----------|---------|-----------|
+| 좌상단 origin tag (`spawn` / `native`) | `classification` | `session_view._classify_origin` (a-ok: prefix 매칭) |
+| 헤더 제목 | `ai_title` → fallback `first_message`  | `hermes_agent_sessions` (spawn) / `claude_session_parity` (native) |
+| git branch chip | `git_branch` | 같은 parity 테이블 (출처별 분기) |
+| recap card 본문 | `recap_native` | `session_recaps` 테이블 |
+| PR chips | `pr_links[]` | `session_pr_links` 테이블 |
+| 파일 chips + insertions/deletions | `files_touched[]` | `session_files_touched` |
+| 최근 tool chips | `tools_recent[]` | `session_tools_recent` |
+| pending follow-up | `pending_queue[]` | `session_pending_queue` |
+| turn / cost | `turn_count`, `total_cost_usd` | `hermes_sessions` (writer 가 sync 시 백필) |
+| 마지막 활동 | `last_used_at` | `hermes_sessions.last_used_at` (writer 가 MAX 로 전진) |
+
+위 자식 테이블이 비어있어도 카드 자체는 그려진다 — FE 는 빈 배열을 hide
+처리한다.
+
+> 참고: 레거시 `worker_sessions` 테이블은 Phase 2 에서 더 이상 FE 어디에도
+> 노출하지 않는다 (현 호스트 0 rows). 자세한 절차는
+> `docs/operations.md` "Legacy `workerctl sessions list` (deprecated)" 참고.
 
 ### Native 디스커버리
 
@@ -162,6 +201,23 @@ workerctl dashboard-daemon --no-watch  # supervisor 없이 그대로 detach
 stdlib 만 사용하므로 Windows/Git-Bash 양쪽에서 동일하게 동작한다. 자세한
 Hermes 통합 예시는 `docs/operations.md` 참고.
 
+## Phase 2 — heartbeat in-memory synthesis 제거
+
+PR #5 이전의 heartbeat (`worker_control_hermes/heartbeat.py` line 339–364)
+는 ledger 가 모르는 jsonl 파일을 발견하면 메모리 안에서 `_synthetic=True`
+row 를 만들어 Slack DM 에 끼워 넣었다. dashboard / build_report 는 그
+synthesized row 를 못 봤기 때문에 화면마다 보는 세션이 달랐다.
+
+PR #4 의 `worker_control.session_sync` 가 jsonl / profile JSON / 디스패처
+argv 세 소스를 모두 **실제 row 로** persist 시키면서 그 메모리 합성 블록은
+**완전히 삭제**됐다. 이제 모든 consumer 가 동일한 `session_view` 를 본다 —
+dashboard 도 예외 없다.
+
+PR #6 의 `workerctl session sync-all` 은 heartbeat 가 매 30 분 틱마다 직접
+호출한다 (`_sync_ledger_before_classify()`). 화면 freshness 가 30 분으로
+부족하면 `*/5 min` cron / Task Scheduler / systemd-timer 로 같은 명령을
+추가 등록한다 (recipe 는 `docs/operations.md`).
+
 ## Telegram snapshot (`dashboard-snapshot`)
 
 레거시 단일 파일 HTML 은 더 이상 일상 운영에서 쓰지 않는다. Hermes cron
@@ -179,6 +235,10 @@ workerctl dashboard-snapshot
 살아있다 = `worker_sessions.state ∈ {starting, running, working,
 waiting_input, blocked}` 또는 최근 24 시간 내 mtime 의 native 세션이
 존재할 때. 살아있지 않으면 stdout 을 비워서 cron 이 조용히 지나간다.
+
+> **참고**: `worker_sessions` 테이블은 Phase 2 에서 deprecate 되었고
+> 현 호스트 기준 0 rows 라 사실상 `native` 24h mtime 만으로 alive 판정이
+> 굴러간다. 향후 tmux/console 워커가 실제로 쓰일 때 부활시킨다.
 
 ## 레거시: 단일 파일 HTML export
 

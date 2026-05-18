@@ -405,6 +405,46 @@ WantedBy=timers.target
 systemctl enable --now workerctl-sync-all.timer
 ```
 
+## Legacy `workerctl sessions list` (deprecated)
+
+Phase 2 (PR #4–#7) 가 ``hermes_sessions`` 를 단일 ledger 로 정리하면서
+레거시 ``worker_sessions`` 테이블은 더 이상 화면 어디에도 노출되지 않는다.
+현 호스트 기준 0 rows 이고 dashboard / heartbeat / build_report 가 의존하지
+않는다.
+
+| 구버전 | 신버전 (Phase 2) |
+|--------|------------------|
+| `workerctl sessions list`         | `workerctl session sync-all` + dashboard (`http://127.0.0.1:8765/`) 의 Hermes / Native 탭 |
+| `worker_sessions` SQLite 테이블 | `hermes_sessions` (단일 ledger) + 5종 parity 자식 테이블 |
+| heartbeat 의 in-memory synthesis | `session_sync` 가 persist (heartbeat 가 매 틱마다 `sync-all` 호출) |
+
+진입점 자체는 **남겨두지만 호출 시 stderr 에 1줄 deprecation 경고** 를
+찍는다:
+
+```
+$ workerctl sessions list
+warning: `workerctl sessions` is deprecated; use `workerctl session
+sync-all` + the dashboard's Hermes/Native tabs (Phase 2 unified
+hermes_sessions ledger). See docs/operations.md "Legacy `workerctl
+sessions list` (deprecated)" for the migration table.
+(no sessions)
+```
+
+원칙:
+
+- 테이블 자체는 read-only 로 남겨둔다. 스키마는 변경하지 않는다.
+- 외부 호출은 차단하지 않는다 (cheap to add later — 향후 tmux/console
+  워커가 실제로 쓰이는 호스트가 생기면 다시 살린다).
+- 새 코드 / 새 cron 이 ``workerctl sessions`` 를 호출하지 못하도록 코드
+  리뷰에서 차단한다. 마이그레이션 후보가 보이면 `workerctl session …` 으로
+  교체.
+
+복귀 조건 (deprecation 을 풀고 다시 활성화하는 시점):
+
+- 이 도구가 띄운 tmux/console 워커가 실제로 사용되기 시작.
+- `worker_sessions` 행이 의미 있는 cardinality 로 쌓이고, dashboard 의
+  Hermes 탭과 별도의 패널이 필요하다는 사용자 요구가 명시.
+
 ## 미래 확장 (계획만)
 
 - GitHub Issues / Linear 폴링 → 새 워커 자동 스폰
