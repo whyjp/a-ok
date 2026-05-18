@@ -321,6 +321,90 @@ heartbeat (`workerctl-hermes-heartbeat`) 가 sweep 후보를 자체 snapshot 의
 상세 패턴 / PM-side SOUL.md 권고 사항: `hermes-pm-dispatcher-profile` 스킬의
 `references/run-lifecycle-hooks.md`.
 
+## 세션 레저 sync-all (Phase 2 PR #6)
+
+`hermes_sessions` 는 단일 writer (`worker_control.session_sync`) 가
+관리한다. 디스크의 두 소스 — `~/.claude/projects/<encoded>/<uuid>.jsonl`
+과 `<hermes_home>/profiles/*/sessions/session_*.json` — 를 한 번에
+훑어서 upsert 하는 진입점이 `workerctl session sync-all` 이다.
+
+```bash
+# 기본 — 디스크 전체 walk, mtime 변하지 않은 파일은 파싱 자체를 건너뜀
+workerctl session sync-all
+
+# --since: 그 시각 이후 mtime 인 파일만
+workerctl session sync-all --since 2026-05-18T00:00:00Z
+
+# --dry-run: 카운터만 계산, DB write 없음
+workerctl session sync-all --dry-run
+
+# --quiet: 50개마다 찍히는 진행상황과 끝 요약 한 줄 모두 끔
+workerctl session sync-all --quiet
+```
+
+종료 직전 한 줄 요약:
+
+```
+sync-all: synced(jsonl)=31 synced(profile)=0 skipped(mtime_unchanged)=119
+          skipped(no_project)=0 skipped(no_uuid)=94 errors=0
+          reclassify=(spawned=17,native=158) (726 ms)
+```
+
+* `skipped_mtime_unchanged` — 캐시된 `last_used_at` 이상으로 mtime 이
+  움직이지 않은 파일. 파싱조차 하지 않으므로 hot path.
+* `synced_jsonl` / `synced_profile` — `upsert_session` 으로 실제 row 가
+  들어가거나 갱신된 수.
+* `reclassify=(spawned=N,native=M)` — `_reclassify_origins` 호출 결과
+  (`hermes_runs.mode='print'` 이 존재하는 세션만 spawned).
+
+기본 운영에서는 **heartbeat 가 매 틱마다 `sync_all` 을 호출**하므로
+별도 cron 은 필수가 아니다 (30 분 freshness 가 허용 가능하다는 전제).
+5 분 freshness 가 필요하면 아래 둘 중 하나로 등록한다.
+
+### Windows Task Scheduler
+
+```powershell
+# 5분 주기. powershell 창은 -WindowStyle Hidden 으로 숨김
+schtasks /Create /SC MINUTE /MO 5 /TN "workerctl-session-sync-all" `
+  /TR "powershell -WindowStyle Hidden -Command `"workerctl session sync-all --quiet`""
+```
+
+### POSIX cron
+
+```cron
+*/5 * * * *   /usr/local/bin/workerctl session sync-all --quiet >> /var/log/workerctl-sync.log 2>&1
+```
+
+### systemd-timer
+
+```ini
+# /etc/systemd/system/workerctl-sync-all.service
+[Unit]
+Description=workerctl session sync-all
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/workerctl session sync-all --quiet
+```
+
+```ini
+# /etc/systemd/system/workerctl-sync-all.timer
+[Unit]
+Description=Run workerctl session sync-all every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=workerctl-sync-all.service
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl enable --now workerctl-sync-all.timer
+```
+
 ## 미래 확장 (계획만)
 
 - GitHub Issues / Linear 폴링 → 새 워커 자동 스폰
