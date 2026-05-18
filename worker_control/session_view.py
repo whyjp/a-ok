@@ -149,6 +149,14 @@ class SessionView:
     recaps: list[dict[str, Any]] = field(default_factory=list)
     pending_queue: list[dict[str, Any]] = field(default_factory=list)
 
+    # ── derived display state (computed, not stored) ─────────────────────
+    # Three buckets the dashboard renders as colored pills:
+    #   active   = session is or was recently touched (≤ 2h)
+    #   inactive = touched within 2h–24h ago
+    #   done     = ended explicitly, or status indicates terminal, or ≥ 24h
+    # Precedence: ended_at / terminal status > effective_status > recency.
+    display_status: str = "inactive"
+
 
 # ---------------------------------------------------------------------------
 # SQL (split out so tests can introspect column expectations)
@@ -228,6 +236,79 @@ def _matches_prefix(name: str | None, prefixes: tuple[str, ...]) -> str | None:
         if name.startswith(p):
             return p
     return None
+
+
+_TERMINAL_STATUSES = frozenset({"done", "failed", "abandoned"})
+
+# Recency thresholds used by ``_compute_display_status``.
+# Kept as module-level constants so tests can pin them.
+ACTIVE_WINDOW_SECONDS = 2 * 60 * 60      # ≤ 2h     → active
+INACTIVE_WINDOW_SECONDS = 24 * 60 * 60   # 2h–24h   → inactive; ≥ 24h → done
+
+
+def _parse_iso_dt(ts: str | None):
+    """Best-effort ISO-8601 parse — returns aware UTC datetime or None.
+
+    Mirrors ``heartbeat._parse_iso`` minus its dependency on a module-level
+    NOW, so the session_view reader can be tested deterministically.
+    """
+    if not ts:
+        return None
+    import datetime as _dt
+    s = ts.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        d = _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.timezone.utc)
+    return d
+
+
+def _compute_display_status(
+    *,
+    status: str | None,
+    ended_at: str | None,
+    effective_status: str | None,
+    last_used_at: str | None,
+    now=None,
+) -> str:
+    """Return ``"active" | "inactive" | "done"`` for a session row.
+
+    Precedence (highest first):
+
+    1. ``ended_at`` set OR ledger ``status`` is terminal       → ``done``
+    2. agent-parity ``effective_status == 'active'``           → ``active``
+    3. recency of ``last_used_at`` against fixed thresholds:
+       ≤ 2h → ``active``;  ≤ 24h → ``inactive``;  > 24h → ``done``
+
+    Missing/unparseable ``last_used_at`` falls back to ``inactive`` so a
+    row without a timestamp doesn't look greener than rows that have one.
+    """
+    if ended_at:
+        return "done"
+    if (status or "").lower() in _TERMINAL_STATUSES:
+        return "done"
+    if (effective_status or "").lower() == "active":
+        return "active"
+
+    import datetime as _dt
+    if now is None:
+        now = _dt.datetime.now(_dt.timezone.utc)
+    last = _parse_iso_dt(last_used_at)
+    if last is None:
+        return "inactive"
+    age_s = (now - last).total_seconds()
+    if age_s < 0:
+        # Future timestamp — treat as just-touched.
+        return "active"
+    if age_s <= ACTIVE_WINDOW_SECONDS:
+        return "active"
+    if age_s <= INACTIVE_WINDOW_SECONDS:
+        return "inactive"
+    return "done"
 
 
 def _classify(
@@ -648,6 +729,12 @@ def list_sessions(
             tools_recent=kids.get("tools_recent", []),
             recaps=kids.get("recaps", []),
             pending_queue=kids.get("pending_queue", []),
+            display_status=_compute_display_status(
+                status=r["status"],
+                ended_at=r["ended_at"],
+                effective_status=agent.get("effective_status"),
+                last_used_at=r["last_used_at"],
+            ),
         ))
         if limit is not None and len(out) >= limit:
             break
