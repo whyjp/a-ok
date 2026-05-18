@@ -39,9 +39,10 @@ import json
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -495,12 +496,336 @@ def sync_jsonl_dir(
     return counts
 
 
+# ---------------------------------------------------------------------------
+# sync_all — disk-walking entry point (Phase 2 PR #6)
+# ---------------------------------------------------------------------------
+#
+# PR #4 introduced the writer and PR #5 the reader. PR #6 wires both ends to a
+# scheduler-friendly entry point that walks every known on-disk source and
+# materialises the rows. ``workerctl session sync-all`` + the heartbeat tick
+# call this; nothing else writes to ``hermes_sessions`` outside the
+# already-delegating per-row paths.
+#
+# Walk targets:
+#   1. ``~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`` — every claude-code
+#      transcript that ships UUID-shaped names. ``from_jsonl`` decides
+#      whether the file is upsertable.
+#   2. ``<hermes_home>/profiles/<name>/sessions/session_*.json`` and
+#      ``<hermes_home>/sessions/session_*.json`` — hermes-profile session
+#      files. ``from_profile_session_json`` only emits a write when the
+#      JSON carries an explicit ``claude_session_id`` (rare today, but
+#      future-proof — see PR #4 review).
+#
+# Skip behaviour:
+#   * mtime-keyed skip — we pre-fetch ``(uuid, last_used_at)`` from
+#     ``hermes_sessions`` once and, for every file whose mtime is already
+#     covered, do not even open it. This is the entire reason a 50-file
+#     heartbeat call lands under 1 s.
+#   * ``--since <iso>`` — files older than the cutoff are ignored outright.
+#
+# Reclassify:
+#   After all upserts, we call the same SQL ``_reclassify_origins`` ships
+#   (inline-copied here to keep ``session_sync`` import-free of the hermes
+#   sub-package). Idempotent.
+
+_HERMES_PROJECTS_SUBDIR = "projects"  # not used, kept for symmetry with docs
+
+
+def _default_claude_projects_dir() -> Path:
+    return Path(
+        os.environ.get("CLAUDE_PROJECTS_DIR")
+        or (Path.home() / ".claude" / "projects")
+    )
+
+
+def _default_hermes_home() -> Path | None:
+    env = os.environ.get("HERMES_HOME")
+    if env:
+        return Path(env).expanduser()
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            return Path(local) / "hermes"
+        return Path.home() / "AppData" / "Local" / "hermes"
+    # POSIX preferred → fallback
+    for c in (
+        Path.home() / ".local" / "share" / "hermes",
+        Path.home() / ".hermes",
+    ):
+        if c.is_dir():
+            return c
+    return None
+
+
+def _iter_hermes_session_jsons(hermes_home: Path) -> Iterable[Path]:
+    """Yield every ``session_*.json`` reachable under a hermes home.
+
+    Walks ``profiles/<name>/sessions/`` (the normal case) and the
+    top-level ``sessions/`` directory (the implicit default profile).
+    """
+    if not hermes_home.is_dir():
+        return
+    root_sessions = hermes_home / "sessions"
+    if root_sessions.is_dir():
+        for j in root_sessions.glob("session_*.json"):
+            yield j
+    profiles_dir = hermes_home / "profiles"
+    if profiles_dir.is_dir():
+        for prof in profiles_dir.iterdir():
+            sd = prof / "sessions"
+            if sd.is_dir():
+                for j in sd.glob("session_*.json"):
+                    yield j
+
+
+def _reclassify_origins(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Inline copy of ``worker_control_hermes.projects._reclassify_origins``.
+
+    Duplicated to keep ``session_sync`` from importing the hermes
+    sub-package (which itself imports ``session_sync`` — circular). The
+    SQL is locked-in (see the docstring in ``projects.py``); if it ever
+    changes there, change it here too.
+    """
+    conn.execute(
+        """
+        UPDATE hermes_sessions
+           SET origin = CASE
+               WHEN EXISTS (
+                   SELECT 1 FROM hermes_runs r
+                   WHERE r.session_id = hermes_sessions.id AND r.mode = 'print'
+               ) THEN 'spawned'
+               ELSE 'native'
+           END
+        """
+    )
+    sp = conn.execute(
+        "SELECT COUNT(*) FROM hermes_sessions WHERE origin='spawned'"
+    ).fetchone()[0]
+    nv = conn.execute(
+        "SELECT COUNT(*) FROM hermes_sessions WHERE origin='native'"
+    ).fetchone()[0]
+    return int(sp), int(nv)
+
+
+@dataclass(slots=True)
+class SyncAllResult:
+    synced_jsonl: int = 0
+    synced_profile: int = 0
+    skipped_mtime_unchanged: int = 0
+    skipped_no_project: int = 0
+    skipped_no_uuid: int = 0
+    errors: int = 0
+    reclassify_spawned: int = 0
+    reclassify_native: int = 0
+    duration_ms: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "synced_jsonl": self.synced_jsonl,
+            "synced_profile": self.synced_profile,
+            "skipped_mtime_unchanged": self.skipped_mtime_unchanged,
+            "skipped_no_project": self.skipped_no_project,
+            "skipped_no_uuid": self.skipped_no_uuid,
+            "errors": self.errors,
+            "reclassify_spawned": self.reclassify_spawned,
+            "reclassify_native": self.reclassify_native,
+            "duration_ms": self.duration_ms,
+        }
+
+
+def _mtime_iso(p: Path) -> str | None:
+    try:
+        ts = p.stat().st_mtime
+    except OSError:
+        return None
+    return _dt.datetime.fromtimestamp(
+        ts, tz=_dt.timezone.utc
+    ).isoformat(timespec="seconds")
+
+
+def sync_all(
+    conn: sqlite3.Connection,
+    *,
+    claude_projects_dir: Path | str | None = None,
+    hermes_home: Path | str | None = None,
+    since: str | None = None,
+    dry_run: bool = False,
+    quiet: bool = True,
+    progress_every: int = 50,
+    on_progress: Callable[[str, int, int], None] | None = None,
+) -> SyncAllResult:
+    """Walk every disk source and upsert into ``hermes_sessions``.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection.  Caller owns the lifecycle; we do not
+        commit (sqlite3 autocommit + ``isolation_level=None`` is how
+        ``worker_control.db.connect`` already opens it).
+    claude_projects_dir:
+        Override for ``~/.claude/projects``.  Falls back to env
+        ``CLAUDE_PROJECTS_DIR`` then to the home-relative default.
+    hermes_home:
+        Override for the hermes home.  ``None`` → ``HERMES_HOME`` env,
+        then platform default.  If the path doesn't exist the profile
+        walk is silently skipped (a host without hermes is fine).
+    since:
+        ISO-8601 cutoff.  Files older than this are not opened.
+    dry_run:
+        Build the result counters without touching the DB.
+    quiet:
+        Suppress per-50-file progress prints.
+    """
+    t0 = time.monotonic()
+    result = SyncAllResult()
+
+    claude_dir = Path(claude_projects_dir) if claude_projects_dir else _default_claude_projects_dir()
+    home = Path(hermes_home) if hermes_home else _default_hermes_home()
+
+    # Pre-fetch the (uuid → last_used_at) cache for mtime-skip.  One scan
+    # of an already-synced ledger is cheap; one row per touched session is
+    # the difference between "heartbeat takes 30 s" and "heartbeat takes
+    # 0.3 s".
+    cache: dict[str, str] = {}
+    try:
+        for row in conn.execute(
+            "SELECT uuid, last_used_at FROM hermes_sessions"
+        ).fetchall():
+            try:
+                cache[row["uuid"]] = row["last_used_at"] or ""
+            except (IndexError, TypeError):
+                cache[row[0]] = row[1] or ""
+    except sqlite3.OperationalError:
+        # Fresh DB with no schema yet — nothing to skip against.
+        pass
+
+    def _emit(label: str, processed: int, total: int) -> None:
+        if on_progress is not None:
+            on_progress(label, processed, total)
+        elif not quiet and progress_every and processed % progress_every == 0:
+            print(f"[sync-all] {label} … {processed}/{total}")
+
+    # ----- 1. claude-code jsonl walk ----------------------------------------
+    jsonl_paths: list[Path] = []
+    if claude_dir.is_dir():
+        for proj_dir in claude_dir.iterdir():
+            if not proj_dir.is_dir():
+                continue
+            for j in proj_dir.glob("*.jsonl"):
+                jsonl_paths.append(j)
+
+    total_jsonl = len(jsonl_paths)
+    for idx, jpath in enumerate(jsonl_paths, start=1):
+        try:
+            mtime_iso = _mtime_iso(jpath)
+            if since and mtime_iso and mtime_iso < since:
+                result.skipped_mtime_unchanged += 1
+                _emit("jsonl", idx, total_jsonl)
+                continue
+            uid = jpath.stem.lower()
+            cached_last = cache.get(uid)
+            if (
+                cached_last
+                and mtime_iso
+                and mtime_iso <= cached_last
+            ):
+                # File hasn't moved since the row's last_used_at — nothing
+                # to do.  This is the hot path on a heartbeat tick.
+                result.skipped_mtime_unchanged += 1
+                _emit("jsonl", idx, total_jsonl)
+                continue
+
+            upsert = from_jsonl(jpath)
+            if upsert is None:
+                result.skipped_no_uuid += 1
+                _emit("jsonl", idx, total_jsonl)
+                continue
+            if dry_run:
+                result.synced_jsonl += 1
+                _emit("jsonl", idx, total_jsonl)
+                continue
+            try:
+                upsert_session(conn, upsert)
+            except ProjectNotRegistered:
+                result.skipped_no_project += 1
+                _emit("jsonl", idx, total_jsonl)
+                continue
+            cache[upsert.uuid] = upsert.last_used_at or cached_last or ""
+            result.synced_jsonl += 1
+            _emit("jsonl", idx, total_jsonl)
+        except Exception:
+            result.errors += 1
+            _emit("jsonl", idx, total_jsonl)
+
+    # ----- 2. hermes profile session_*.json walk ----------------------------
+    profile_paths: list[Path] = []
+    if home is not None:
+        profile_paths = list(_iter_hermes_session_jsons(home))
+    total_prof = len(profile_paths)
+    for idx, ppath in enumerate(profile_paths, start=1):
+        try:
+            mtime_iso = _mtime_iso(ppath)
+            if since and mtime_iso and mtime_iso < since:
+                result.skipped_mtime_unchanged += 1
+                _emit("profile", idx, total_prof)
+                continue
+
+            upsert = from_profile_session_json(ppath)
+            if upsert is None:
+                # No claude_session_id in this file — that's the normal
+                # case for hermes-only sessions; not an error.
+                result.skipped_no_uuid += 1
+                _emit("profile", idx, total_prof)
+                continue
+            cached_last = cache.get(upsert.uuid)
+            if (
+                cached_last
+                and mtime_iso
+                and mtime_iso <= cached_last
+                and (not upsert.last_used_at or upsert.last_used_at <= cached_last)
+            ):
+                result.skipped_mtime_unchanged += 1
+                _emit("profile", idx, total_prof)
+                continue
+            if dry_run:
+                result.synced_profile += 1
+                _emit("profile", idx, total_prof)
+                continue
+            try:
+                upsert_session(conn, upsert)
+            except ProjectNotRegistered:
+                result.skipped_no_project += 1
+                _emit("profile", idx, total_prof)
+                continue
+            cache[upsert.uuid] = upsert.last_used_at or cached_last or ""
+            result.synced_profile += 1
+            _emit("profile", idx, total_prof)
+        except Exception:
+            result.errors += 1
+            _emit("profile", idx, total_prof)
+
+    # ----- 3. reclassify origins -------------------------------------------
+    if not dry_run:
+        try:
+            sp, nv = _reclassify_origins(conn)
+            result.reclassify_spawned = sp
+            result.reclassify_native = nv
+        except sqlite3.OperationalError:
+            # Schema missing — leave 0/0.
+            pass
+
+    result.duration_ms = int((time.monotonic() - t0) * 1000)
+    return result
+
+
 __all__ = [
     "ProjectNotRegistered",
     "SessionUpsert",
+    "SyncAllResult",
     "from_dispatcher_argv",
     "from_jsonl",
     "from_profile_session_json",
+    "sync_all",
     "sync_jsonl_dir",
     "upsert_session",
 ]

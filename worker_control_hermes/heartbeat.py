@@ -898,6 +898,36 @@ def post_to_slack(text: str, blocks: list[dict] | None = None) -> dict:
         return {"ok": False, "error": f"HTTP {e.code}", "body": e.read().decode("utf-8", "ignore")}
 
 
+def _sync_ledger_before_classify() -> None:
+    """Phase 2 PR #6 — reconcile ``hermes_sessions`` from disk before classify.
+
+    The heartbeat reads from the unified ``session_view`` (PR #5); that
+    reader trusts ``hermes_sessions`` to be current. The Phase 2 design
+    keeps the disk → DB writer in one module (``session_sync``); calling
+    ``sync_all`` here is the only thing the heartbeat needs to do to keep
+    the ledger fresh on every tick. mtime-keyed skip inside ``sync_all``
+    makes this < 1 s on a populated host; failures are non-fatal — a stale
+    classify is still better than no heartbeat post.
+    """
+    try:
+        import time as _t
+        from worker_control.db import connect as _connect
+        from worker_control.session_sync import sync_all as _sync_all
+        t0 = _t.monotonic()
+        with _connect(DB_PATH) as conn:
+            res = _sync_all(conn, quiet=True)
+        ms = int((_t.monotonic() - t0) * 1000)
+        print(
+            f"[session-sync] sync_all: jsonl={res.synced_jsonl} "
+            f"profile={res.synced_profile} "
+            f"skipped_mtime={res.skipped_mtime_unchanged} "
+            f"errors={res.errors} ({ms} ms)",
+            file=sys.stderr,
+        )
+    except Exception as e:
+        print(f"[session-sync] sync_all failed: {e!r}", file=sys.stderr)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--window", type=int, default=30, help="lookback window in minutes (default 30)")
@@ -906,6 +936,9 @@ def main() -> None:
                    help="post the legacy plain-text layout instead of the Block Kit card")
     p.add_argument("--json", action="store_true", help="dump raw classification as JSON")
     args = p.parse_args()
+
+    # Phase 2 PR #6 — reconcile ledger from disk before classify reads it.
+    _sync_ledger_before_classify()
 
     snap = classify_sessions(args.window)
     if args.json:

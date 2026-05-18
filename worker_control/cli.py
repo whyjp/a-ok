@@ -8,7 +8,7 @@ from typing import Sequence
 
 from worker_control import (
     __version__, autostart, dashboard, db, profiles, projects, scanner,
-    server, sessions, snapshot,
+    server, session_sync, sessions, snapshot,
 )
 from worker_control.paths import (
     classify_path,
@@ -333,6 +333,36 @@ def cmd_sessions_sync_hermes(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_session_sync_all(args: argparse.Namespace) -> int:
+    """Phase 2 PR #6 — walk every disk source once and reconcile the ledger.
+
+    Calls ``session_sync.sync_all`` against the canonical DB. The function
+    itself is idempotent; the CLI is a thin wrapper that adds progress
+    printing and a one-line summary so cron / heartbeat can both reach the
+    same code path without diverging on logging behaviour.
+    """
+    with db.connect() as conn:
+        result = session_sync.sync_all(
+            conn,
+            since=args.since,
+            dry_run=args.dry_run,
+            quiet=args.quiet,
+        )
+    if not args.quiet:
+        print(
+            f"sync-all: synced(jsonl)={result.synced_jsonl} "
+            f"synced(profile)={result.synced_profile} "
+            f"skipped(mtime_unchanged)={result.skipped_mtime_unchanged} "
+            f"skipped(no_project)={result.skipped_no_project} "
+            f"skipped(no_uuid)={result.skipped_no_uuid} "
+            f"errors={result.errors} "
+            f"reclassify=(spawned={result.reclassify_spawned},"
+            f"native={result.reclassify_native}) "
+            f"({result.duration_ms} ms)"
+        )
+    return 0 if result.errors == 0 else 1
+
+
 # --- argparse wiring ---------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -410,6 +440,38 @@ def _build_parser() -> argparse.ArgumentParser:
         help="restrict to a profile name (repeatable; default = all profiles)",
     )
     sh.set_defaults(func=cmd_sessions_sync_hermes)
+
+    # session — Phase 2 PR #6 singular subcommand for unified writer entry
+    # points. Today it only carries `sync-all`; future PRs will migrate the
+    # other session lifecycle commands here.
+    sess = sub.add_parser(
+        "session",
+        help="unified session-ledger ops (Phase 2 PR #6+)",
+    )
+    sess_sub = sess.add_subparsers(dest="action", required=True)
+
+    ssa = sess_sub.add_parser(
+        "sync-all",
+        help="walk ~/.claude/projects/*.jsonl + hermes profiles' session_*.json "
+             "and upsert every row into hermes_sessions via the unified "
+             "session_sync writer; finishes by calling reclassify_origins. "
+             "Idempotent; safe to run on a 5-min cron.",
+    )
+    ssa.add_argument(
+        "--since", default=None,
+        help="ISO-8601 cutoff: ignore files older than this "
+             "(applies to file mtime — a fast pre-filter, not a "
+             "session-touched-since filter)",
+    )
+    ssa.add_argument(
+        "--dry-run", action="store_true",
+        help="walk and count but do not write to the DB",
+    )
+    ssa.add_argument(
+        "--quiet", action="store_true",
+        help="suppress progress and the final summary line",
+    )
+    ssa.set_defaults(func=cmd_session_sync_all)
 
     # view (dashboard FE + BFF; legacy export 도 여기 아래)
     vv = sub.add_parser(

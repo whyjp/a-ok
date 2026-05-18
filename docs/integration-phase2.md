@@ -117,11 +117,17 @@ the rows.
 
 **Out of scope:** sync-all CLI, scheduling.
 
-### PR #6 — `workerctl session sync-all` + heartbeat auto-sync  (≤1h)
+### PR #6 — `workerctl session sync-all` + heartbeat auto-sync  (≤1h) — **DONE**
 
-Add the CLI subcommand. Have `workerctl-hermes-heartbeat` call
-`session_sync.sync_all()` before classification. Optional cron job
-registration documented in `docs/operations.md`.
+Added `workerctl session sync-all` CLI + `session_sync.sync_all()`.
+Heartbeat (`workerctl-hermes-heartbeat`) calls
+`_sync_ledger_before_classify()` immediately before `classify_sessions()`
+so the unified `session_view` (PR #5) reads a ledger at most one tick
+stale. Measured latency on this host (150 jsonl + 94 profile JSONs):
+~720 ms with 124/150 files mtime-skipped. Optional 5-minute cron / Task
+Scheduler / systemd-timer recipes live in `docs/operations.md`.
+
+(PR URL filled by PM after merge.)
 
 ### PR #7 — docs + deprecate `worker_sessions`  (≤30min)
 
