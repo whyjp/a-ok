@@ -83,29 +83,29 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _fetch_session(key: str) -> tuple[sqlite3.Row, sqlite3.Row]:
+def _fetch_session(key: str):
+    """Resolve ``key`` to a (SessionView, project_row) tuple.
+
+    PR #5 (Phase 2): session lookup now goes through
+    ``worker_control.session_view.get_session`` so all consumers share
+    the same fuzzy-match rules and the report stays in sync with the
+    dashboard / heartbeat view. Project info is still loaded directly
+    from ``hermes_projects_v`` because the report needs ``git_repo`` —
+    a column the session-side view doesn't carry.
+    """
+    from worker_control.session_view import get_session
+    try:
+        sess = get_session(key)
+    except LookupError as exc:
+        raise SystemExit(str(exc))
+    if sess is None:
+        raise SystemExit(f"Session not found: {key}")
     with _connect() as conn:
-        sess = None
-        if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-                        key, re.IGNORECASE):
-            sess = conn.execute("SELECT * FROM hermes_sessions WHERE uuid=?", (key.lower(),)).fetchone()
-        if not sess and key.isdigit():
-            sess = conn.execute("SELECT * FROM hermes_sessions WHERE id=?", (int(key),)).fetchone()
-        if not sess:
-            rows = conn.execute(
-                "SELECT * FROM hermes_sessions WHERE name=? OR uuid LIKE ? OR name LIKE ? "
-                "ORDER BY last_used_at DESC", (key, f"{key}%", f"%{key}%"),
-            ).fetchall()
-            if len(rows) == 1:
-                sess = rows[0]
-            elif len(rows) > 1:
-                names = ", ".join(f"#{r['id']} {r['name']}" for r in rows)
-                raise SystemExit(f"Ambiguous session key '{key}': {names}")
-        if not sess:
-            raise SystemExit(f"Session not found: {key}")
-        proj = conn.execute("SELECT * FROM hermes_projects_v WHERE id=?",
-                            (sess["project_id"],)).fetchone()
-        return sess, proj
+        proj = conn.execute(
+            "SELECT * FROM hermes_projects_v WHERE id=?",
+            (sess.project_id,),
+        ).fetchone()
+    return sess, proj
 
 
 # ---------------------------------------------------------------------------
@@ -302,15 +302,15 @@ _STATUS_LABELS = {
 
 
 def _render_html(*, title: str, status: str, body_md: str,
-                 sess: sqlite3.Row, proj: sqlite3.Row) -> str:
+                 sess, proj: sqlite3.Row) -> str:
     label, css_class = _STATUS_LABELS.get(status, (status, "active"))
     repo_row = (
         f'<div class="k">repo</div><div class="v">{html.escape(proj["git_repo"])}</div>'
         if proj["git_repo"] else ""
     )
     brief_row = (
-        f'<div class="k">brief</div><div class="v">{html.escape(sess["brief"] or "")}</div>'
-        if sess["brief"] else ""
+        f'<div class="k">brief</div><div class="v">{html.escape(sess.brief or "")}</div>'
+        if sess.brief else ""
     )
     return _HTML_TEMPLATE.format(
         title_esc=html.escape(title),
@@ -319,8 +319,8 @@ def _render_html(*, title: str, status: str, body_md: str,
         status_label=label,
         project_esc=html.escape(proj["display_name"] or Path(proj["folder_path"]).name),
         generated_at=_dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
-        session_name_esc=html.escape(sess["name"]),
-        session_uuid=sess["uuid"],
+        session_name_esc=html.escape(sess.name),
+        session_uuid=sess.uuid,
         project_path_esc=html.escape(proj["folder_path"]),
         repo_row=repo_row,
         brief_row=brief_row,
@@ -434,7 +434,7 @@ def main() -> None:
     # representation fits their use case.
     body_md = args.body if args.body is not None else args.body_md.read_text(encoding="utf-8")
 
-    out_dir = args.out_dir or (REPORTS_DIR / f"{sess['name']}-{sess['uuid'][:8]}")
+    out_dir = args.out_dir or (REPORTS_DIR / f"{sess.name}-{sess.uuid[:8]}")
     out_dir.mkdir(parents=True, exist_ok=True)
     html_path = out_dir / "index.html"
     md_path   = out_dir / "report.md"
@@ -462,13 +462,13 @@ def main() -> None:
         "local_path": str(html_path),
         "markdown_path": str(md_path),
         "renderer": renderer_used,
-        "session": {"uuid": sess["uuid"], "name": sess["name"], "id": sess["id"]},
+        "session": {"uuid": sess.uuid, "name": sess.name, "id": sess.id},
         "project": {"name": proj["display_name"], "path": proj["folder_path"]},
     }
 
     if args.deploy:
         ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        bname = args.bundle_name or f"worker-{sess['name']}-{ts}"[:80]
+        bname = args.bundle_name or f"worker-{sess.name}-{ts}"[:80]
         # Per spec: iShare ships ONLY the HTML view. The markdown source is
         # for Slack (message body / attachment) and local audit, not for
         # publishing. Stage a temp dir with just index.html (+ any sibling
@@ -493,13 +493,13 @@ def main() -> None:
             now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
             with _connect() as conn:
                 existing_row = conn.execute(
-                    "SELECT notes FROM hermes_sessions WHERE id=?", (sess["id"],)
+                    "SELECT notes FROM hermes_sessions WHERE id=?", (sess.id,)
                 ).fetchone()
                 existing = (existing_row["notes"] if existing_row else "") or ""
                 new = (existing + ("\n" if existing else "")
                        + f"[{now}] report deployed: {result['url']}")
                 conn.execute("UPDATE hermes_sessions SET notes=?, last_used_at=? WHERE id=?",
-                             (new, now, sess["id"]))
+                             (new, now, sess.id))
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

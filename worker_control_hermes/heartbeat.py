@@ -110,28 +110,67 @@ def _fmt_age(d: _dt.datetime | None) -> str:
 # ---------------------------------------------------------------------------
 
 def _load_db_sessions() -> list[dict]:
+    """Return one dict per session from the unified ``session_view`` reader.
+
+    PR #5 (Phase 2): heartbeat used to query ``hermes_sessions`` directly,
+    then synthesize in-memory rows for jsonl files the ledger hadn't
+    picked up (the `_synthetic=True` block — deleted in this PR).
+    ``session_sync`` now persists those rows, so we just read what's in
+    the DB. The returned dict shape is preserved (``name`` / ``origin`` /
+    ``proj_name`` / ``proj_path`` / ``runs``) so the rest of the
+    classification + render pipeline doesn't have to change.
+    """
     if not DB_PATH.is_file():
         return []
+    # Local import: keeps the heartbeat script importable from a checkout
+    # where worker_control isn't on sys.path yet (it normally is — the
+    # package install path adds it — but a manual `python heartbeat.py`
+    # from inside the worker_control_hermes dir benefits from the lazy bind).
+    from worker_control.session_view import list_sessions as _list_sessions
+
+    views = _list_sessions()
+    if not views:
+        return []
+
+    # Per-session runs are still needed for `_line()` / the slack render
+    # (it shows last_run mode/status/started_at). Pull them in one query
+    # keyed by session_id to avoid N+1.
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute("""
-        SELECT s.id, s.uuid, s.name, s.origin, s.status, s.brief, s.model,
-               s.last_used_at, s.ended_at, s.created_at,
-               s.claude_name, s.claude_status, s.claude_status_at,
-               p.display_name AS proj_name, p.folder_path AS proj_path
-        FROM hermes_sessions s
-        JOIN hermes_projects_v p ON p.id = s.project_id
-    """).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["runs"] = [dict(rr) for rr in conn.execute(
-            "SELECT id, run_index, mode, status, started_at, ended_at, name "
-            "FROM hermes_runs WHERE session_id=? ORDER BY started_at",
-            (d["id"],),
-        ).fetchall()]
-        out.append(d)
-    conn.close()
+    runs_by_sid: dict[int, list[dict]] = {}
+    try:
+        for r in conn.execute(
+            "SELECT session_id, id, run_index, mode, status, "
+            "       started_at, ended_at, name FROM hermes_runs "
+            "ORDER BY started_at"
+        ):
+            runs_by_sid.setdefault(r["session_id"], []).append({
+                k: r[k] for k in
+                ("id", "run_index", "mode", "status", "started_at", "ended_at", "name")
+            })
+    finally:
+        conn.close()
+
+    out: list[dict] = []
+    for v in views:
+        out.append({
+            "id":                v.id,
+            "uuid":              v.uuid,
+            "name":              v.name,
+            "origin":            v.origin,
+            "status":            v.status,
+            "brief":             v.brief,
+            "model":             v.model,
+            "last_used_at":      v.last_used_at,
+            "ended_at":          v.ended_at,
+            "created_at":        v.created_at,
+            "claude_name":       v.claude_name,
+            "claude_status":     v.claude_status,
+            "claude_status_at":  v.claude_status_at,
+            "proj_name":         v.project_name,
+            "proj_path":         v.project_path,
+            "runs":              runs_by_sid.get(v.id, []),
+        })
     return out
 
 
@@ -316,6 +355,14 @@ def classify_sessions(window_min: int) -> dict:
     sessions = _load_db_sessions()
     jsonl = _jsonl_lookup()
     db_uuids = {s["uuid"].lower() for s in sessions}
+    # PR #5 (Phase 2): the previous in-memory `_synthetic=True` block that
+    # synthesized native rows for jsonl files missing from the ledger has
+    # been deleted. `session_sync` (PR #4) now persists those rows on the
+    # heartbeat tick (via the dashboard's auto-sync thread or `workerctl
+    # session sync-all`), so `_load_db_sessions()` already returns them.
+    # Any UUID still missing from `db_uuids` after this point is a genuine
+    # gap to investigate (e.g. its cwd doesn't decode), not a transient
+    # one to paper over.
 
     # Subprocess scan — discover every workload (Go binary, test runner,
     # long-lived server) owned by a claude-code session, persist it to the
@@ -347,36 +394,6 @@ def classify_sessions(window_min: int) -> dict:
         except Exception as e:
             # Surface to stderr but never fail the heartbeat over a psutil hiccup.
             print(f"[subprocs] scan failed: {e!r}", file=sys.stderr)
-
-    # Add native sessions that exist on disk but were never imported into the
-    # DB (e.g. user spawned a `claude` and we haven't run sync-native since).
-    # We synthesize a minimal record so they show up in the heartbeat.
-    for uid, info in jsonl.items():
-        if uid in db_uuids:
-            continue
-        # Try to read cwd from first line for a reasonable project label.
-        cwd = ""
-        try:
-            with info["jsonl"].open(encoding="utf-8") as fh:
-                for ln in fh:
-                    try:
-                        d = json.loads(ln)
-                    except Exception:
-                        continue
-                    if d.get("cwd"):
-                        cwd = d["cwd"]
-                        break
-        except Exception:
-            pass
-        sessions.append({
-            "id": None, "uuid": uid, "name": f"native-{uid[:8]}",
-            "origin": "native", "status": "active", "brief": "",
-            "model": None, "last_used_at": info["mtime"].isoformat(),
-            "ended_at": None, "created_at": info["mtime"].isoformat(),
-            "claude_name": None, "claude_status": None, "claude_status_at": None,
-            "proj_name": Path(cwd).name if cwd else "(unknown)",
-            "proj_path": cwd, "runs": [], "_synthetic": True,
-        })
 
     alive_cutoff   = NOW - _dt.timedelta(minutes=5)
     window_cutoff  = NOW - _dt.timedelta(minutes=window_min)
