@@ -158,6 +158,165 @@ def _session_to_dict(s, profile_by_id, project_by_id) -> dict[str, Any]:
     }
 
 
+# Empty parity-extras dict — used when no row exists in hermes_agent_sessions
+# for a given ledger session. Keeping a single canonical default keeps the
+# row shape stable so the FE never has to defensively check for missing keys.
+_EMPTY_PARITY_EXTRAS: dict[str, Any] = {
+    "kind":                None,
+    "git_branch":          None,
+    "claude_version":      None,
+    "msg_user":            0,
+    "msg_assistant":       0,
+    "msg_tool":            0,
+    "ai_title":            None,
+    "summary":             None,
+    "first_user_text":     None,
+    "last_user_text":      None,
+    "last_assistant_text": None,
+    "size_bytes":          None,
+    "spawn_slug":          None,
+    # NOTE: keep `spawn_reason` out of the empty defaults — the ledger view
+    # already exposes its own `spawn_reason` (a-ok prefix:<matched>). Parity
+    # extras only override it when the agent-side parser actually parsed a
+    # spawn_reason out of the transcript.
+    "is_spawned":          False,
+    "effective_status":    None,
+    "pr_links":            [],
+    "files_touched":       [],
+    "tools_recent":        [],
+    "recap_native":        [],
+    "pending_queue":       [],
+}
+
+
+def _load_parity_extras(conn) -> dict[str, dict[str, Any]]:
+    """Return ``{lower(session_uuid): parity-extras-dict}`` from the canonical DB.
+
+    Reads the legacy-parity columns added to ``hermes_agent_sessions`` plus
+    the five child tables (PR links, files, tools, recaps, pending queue).
+    The result is keyed by ``lower(hermes_session_id)`` so callers can merge
+    it into ledger-based rows by ``lower(uuid)`` and into agent-based rows
+    by ``lower(hermes_session_id)`` with one lookup.
+
+    Returns an empty dict if the parity migration hasn't run (columns or
+    tables missing) — the dashboard then falls back to the empty defaults.
+    """
+    extras: dict[str, dict[str, Any]] = {}
+    try:
+        cur = conn.execute(
+            "SELECT hermes_session_id, kind, git_branch, claude_version, "
+            "       msg_user, msg_assistant, msg_tool, ai_title, summary, "
+            "       first_user_text, last_user_text, last_assistant_text, "
+            "       size_bytes, spawn_slug, spawn_reason, is_spawned, "
+            "       effective_status "
+            "FROM hermes_agent_sessions"
+        )
+    except Exception:
+        return extras
+    for r in cur.fetchall():
+        sid = r["hermes_session_id"] or ""
+        extras[sid.lower()] = {
+            "kind":                r["kind"],
+            "git_branch":          r["git_branch"],
+            "claude_version":      r["claude_version"],
+            "msg_user":            r["msg_user"] or 0,
+            "msg_assistant":       r["msg_assistant"] or 0,
+            "msg_tool":            r["msg_tool"] or 0,
+            "ai_title":            r["ai_title"],
+            "summary":             r["summary"],
+            "first_user_text":     r["first_user_text"],
+            "last_user_text":      r["last_user_text"],
+            "last_assistant_text": r["last_assistant_text"],
+            "size_bytes":          r["size_bytes"],
+            "spawn_slug":          r["spawn_slug"],
+            "spawn_reason_agent":  r["spawn_reason"],  # avoid clobbering ledger key
+            "is_spawned":          bool(r["is_spawned"]),
+            "effective_status":    r["effective_status"],
+            "pr_links":            [],
+            "files_touched":       [],
+            "tools_recent":        [],
+            "recap_native":        [],
+            "pending_queue":       [],
+        }
+
+    # Child tables — each defensive against missing tables (parity migration
+    # not applied yet). Caps mirror the legacy report (top-N most-recent).
+    def _safe_iter(sql: str):
+        try:
+            yield from conn.execute(sql)
+        except Exception:
+            return
+
+    for r in _safe_iter(
+        "SELECT session_uuid, url, num, repo, kind FROM session_pr_links"
+    ):
+        d = extras.get((r["session_uuid"] or "").lower())
+        if d is not None:
+            d["pr_links"].append({
+                "url": r["url"], "num": r["num"],
+                "repo": r["repo"], "kind": r["kind"],
+            })
+
+    for r in _safe_iter(
+        "SELECT session_uuid, path FROM session_files_touched "
+        "ORDER BY last_seen_at DESC NULLS LAST"
+    ):
+        d = extras.get((r["session_uuid"] or "").lower())
+        if d is not None and len(d["files_touched"]) < 20:
+            d["files_touched"].append(r["path"])
+
+    for r in _safe_iter(
+        "SELECT session_uuid, name, snippet, ts FROM session_tools_recent "
+        "ORDER BY ord DESC"
+    ):
+        d = extras.get((r["session_uuid"] or "").lower())
+        if d is not None and len(d["tools_recent"]) < 8:
+            d["tools_recent"].append({
+                "name": r["name"], "snippet": r["snippet"], "ts": r["ts"],
+            })
+
+    for r in _safe_iter(
+        "SELECT session_uuid, content, ts FROM session_recaps "
+        "ORDER BY ord DESC"
+    ):
+        d = extras.get((r["session_uuid"] or "").lower())
+        if d is not None and len(d["recap_native"]) < 5:
+            d["recap_native"].append({"content": r["content"], "ts": r["ts"]})
+
+    for r in _safe_iter(
+        "SELECT session_uuid, text, queued_at FROM session_pending_queue "
+        "ORDER BY ord ASC"
+    ):
+        d = extras.get((r["session_uuid"] or "").lower())
+        if d is not None:
+            d["pending_queue"].append({
+                "text": r["text"], "queued_at": r["queued_at"],
+            })
+    return extras
+
+
+def _merge_parity_extras(row: dict[str, Any], extras_map: dict[str, dict[str, Any]],
+                         key: str) -> dict[str, Any]:
+    """Merge parity extras into ``row`` keyed by ``lower(key)``.
+
+    If no extras row exists for this UUID, fills the legacy-parity keys with
+    safe defaults so every snapshot row has a uniform shape.
+    """
+    extra = extras_map.get((key or "").lower())
+    if extra is None:
+        for k, v in _EMPTY_PARITY_EXTRAS.items():
+            row.setdefault(k, v)
+        return row
+    for k, v in _EMPTY_PARITY_EXTRAS.items():
+        # Don't blow away a value the row already provided (e.g. ledger's
+        # own `spawn_reason`); only fill what isn't already set.
+        if k == "spawn_reason":
+            row.setdefault(k, v)
+            continue
+        row[k] = extra.get(k, v)
+    return row
+
+
 def _hermes_ledger_to_dict(v: HermesSessionView) -> dict[str, Any]:
     """HermesSessionView → JSON-serializable dict for the BFF response."""
     return {
@@ -195,6 +354,7 @@ def _hermes_ledger_to_dict(v: HermesSessionView) -> dict[str, Any]:
 
 def _collect_hermes_session_panel(
     ledger: list[HermesSessionView],
+    parity_extras: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Build the "hermes 세션" dashboard panel from the DB (read-only).
 
@@ -255,12 +415,13 @@ def _collect_hermes_session_panel(
     except Exception:
         pass
 
+    extras_map = parity_extras or {}
     all_keys = set(agent_rows) | set(rows_by_hsess)
     rows_out: list[dict[str, Any]] = []
     for sid in all_keys:
         a = agent_rows.get(sid)
         spawned = rows_by_hsess.get(sid, [])
-        rows_out.append({
+        row = {
             "hermes_session_id":  sid,
             "profile_name":       a["profile_name"]      if a else None,
             "profile_path":       a["profile_path"]      if a else None,
@@ -280,7 +441,9 @@ def _collect_hermes_session_panel(
                                   else ("transcript_only" if a else "runs_only"),
             "spawned_claudes":    spawned,
             "spawned_count":      len(spawned),
-        })
+        }
+        _merge_parity_extras(row, extras_map, sid)
+        rows_out.append(row)
     rows_out.sort(
         key=lambda r: (r["transcript_mtime"] or r["started_at"] or "",
                        r["hermes_session_id"]),
@@ -353,8 +516,50 @@ def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
         hermes_profs = []
     hermes_profs_dicts = [hermes_profile_to_dict(p) for p in hermes_profs]
 
+    # Legacy-parity extras (rich per-session metadata + child tables) keyed
+    # by lower(uuid). Loaded once and merged into both ledger panels and the
+    # hermes-agent panel below, so every session row shares the same shape.
+    try:
+        with connect_canonical() as _pc:
+            _pc.row_factory = __import__("sqlite3").Row
+            parity_extras = _load_parity_extras(_pc)
+    except Exception:
+        parity_extras = {}
+
     # Hermes turn-by-turn sessions + their claude spawn relationships.
-    hermes_agent_rows, hermes_agent_counters = _collect_hermes_session_panel(ledger)
+    hermes_agent_rows, hermes_agent_counters = _collect_hermes_session_panel(
+        ledger, parity_extras=parity_extras
+    )
+
+    # Build ledger-side payload rows and enrich with parity extras (PR links,
+    # files, tools, recap, pending). Same shape on both `hermes_sessions` and
+    # `native_sessions` tabs.
+    hermes_sess_rows = [_hermes_ledger_to_dict(v) for v in scv_rows]
+    native_sess_rows = [_hermes_ledger_to_dict(v) for v in native_rows]
+    for r in hermes_sess_rows:
+        _merge_parity_extras(r, parity_extras, r.get("uuid") or "")
+    for r in native_sess_rows:
+        _merge_parity_extras(r, parity_extras, r.get("uuid") or "")
+
+    # Aggregate counters the FE shows on the rich legacy-parity stat cards.
+    parity_counters = {
+        "sessions_with_pr":      sum(
+            1 for r in hermes_sess_rows + native_sess_rows + hermes_agent_rows
+            if r.get("pr_links")
+        ),
+        "sessions_with_pending": sum(
+            1 for r in hermes_sess_rows + native_sess_rows + hermes_agent_rows
+            if r.get("pending_queue")
+        ),
+        "sessions_with_recap":   sum(
+            1 for r in hermes_sess_rows + native_sess_rows + hermes_agent_rows
+            if r.get("recap_native")
+        ),
+        "sessions_with_files":   sum(
+            1 for r in hermes_sess_rows + native_sess_rows + hermes_agent_rows
+            if r.get("files_touched")
+        ),
+    }
 
     snap = DashboardSnapshot(
         generated_at=utcnow_iso(),
@@ -367,9 +572,11 @@ def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
         hermes_home=str(home_path),
         hermes_home_exists=home_path.is_dir(),
         projects=[_project_to_dict(p) for p in projs],
-        # 두 탭의 페이로드 — 같은 ledger 테이블의 행을 prefix 로 분할:
-        hermes_sessions=[_hermes_ledger_to_dict(v) for v in scv_rows],
-        native_sessions=[_hermes_ledger_to_dict(v) for v in native_rows],
+        # 두 탭의 페이로드 — 같은 ledger 테이블의 행을 prefix 로 분할.
+        # 각 행에는 legacy-parity extras (pr_links/files/tools/recap_native/
+        # pending_queue + msg counts + git_branch 등) 가 merge 돼 있다.
+        hermes_sessions=hermes_sess_rows,
+        native_sessions=native_sess_rows,
         hermes_agent_sessions=hermes_agent_rows,
         native_root=native.root,
         native_root_exists=native.root_exists,
@@ -397,6 +604,7 @@ def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
             # 보조: 호스트 디스크 jsonl 파일 카운트 (디버그용, ledger 와 무관)
             "native_jsonl_files": len(native.sessions),
             **hermes_agent_counters,
+            **parity_counters,
         },
     )
     return snap
