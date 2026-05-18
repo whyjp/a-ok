@@ -319,6 +319,20 @@ def cmd_sessions_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sessions_sync_hermes(args: argparse.Namespace) -> int:
+    """Scan every Hermes profile's sessions/*.json and persist to SQLite."""
+    from worker_control.hermes_session_sync import sync_once
+    profiles_filter = tuple(args.profile) if args.profile else None
+    res = sync_once(profiles_filter=profiles_filter)
+    print(
+        f"hermes-session-sync: profiles={res.profiles_scanned} "
+        f"files={res.files_seen} upserted={res.upserted} "
+        f"enriched={res.enrichment_updated} skipped={res.skipped} "
+        f"({res.duration_ms} ms)"
+    )
+    return 0
+
+
 # --- argparse wiring ---------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -384,6 +398,18 @@ def _build_parser() -> argparse.ArgumentParser:
     sx = ss_sub.add_parser("stop", help="stop a session")
     sx.add_argument("session", help="session id or name")
     sx.set_defaults(func=cmd_sessions_stop)
+
+    sh = ss_sub.add_parser(
+        "sync-hermes",
+        help="scan ~/AppData/Local/hermes/profiles/*/sessions/*.json and "
+             "UPSERT into the hermes_agent_sessions table (single source of "
+             "truth for the dashboard's 'hermes 세션' tab)",
+    )
+    sh.add_argument(
+        "--profile", action="append", default=[],
+        help="restrict to a profile name (repeatable; default = all profiles)",
+    )
+    sh.set_defaults(func=cmd_sessions_sync_hermes)
 
     # view (dashboard FE + BFF; legacy export 도 여기 아래)
     vv = sub.add_parser(
