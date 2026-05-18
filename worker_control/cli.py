@@ -35,11 +35,37 @@ def cmd_init(_args: argparse.Namespace) -> int:
 
 def cmd_profiles_list(_args: argparse.Namespace) -> int:
     rows = profiles.list_profiles()
-    if not rows:
+    # Always also list Hermes profiles discovered on disk — even when the
+    # workerctl DB is empty, the dashboard / CLI should show what's actually
+    # on the host.
+    from worker_control.hermes_profiles import (
+        discover_hermes_profiles,
+        hermes_home,
+    )
+    hermes_rows = discover_hermes_profiles()
+
+    if not rows and not hermes_rows:
         print("(no profiles — create one with `workerctl profiles create <name>`)")
         return 0
-    for p in rows:
-        print(f"{p.id:>3}  {p.name:20s}  root={p.root_path}")
+
+    print(f"-- workerctl DB profiles ({len(rows)}) --")
+    if not rows:
+        print("  (none — DB table `worker_profiles` is empty)")
+    else:
+        for p in rows:
+            print(f"  {p.id:>3}  {p.name:20s}  root={p.root_path}")
+
+    print(f"\n-- hermes disk profiles ({len(hermes_rows)}) "
+          f"@ {hermes_home()} --")
+    if not hermes_rows:
+        print("  (no hermes home found)")
+    else:
+        for hp in hermes_rows:
+            tag = " [default]" if hp.is_default else ""
+            model = hp.model or "—"
+            print(f"  {hp.name:20s}{tag}  model={model}  "
+                  f"skills={hp.skills_count}  sessions={hp.sessions_count}")
+            print(f"                          path={hp.path}")
     return 0
 
 
@@ -498,6 +524,12 @@ def _build_parser() -> argparse.ArgumentParser:
              "Hermes-spawned worker_sessions state",
     )
     dsn.set_defaults(func=cmd_dashboard_snapshot)
+
+    # bootstrap + install-hermes-profile (one-shot host setup commands).
+    # Kept in a sibling module so the schema-extension SQL + wrapper template
+    # don't bloat this file.
+    from worker_control import hermes_install
+    hermes_install.add_subcommands(sub)
 
     return p
 

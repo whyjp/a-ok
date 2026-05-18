@@ -17,16 +17,24 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Environment :: Console",
 ]
-dependencies = []
+dependencies = [
+    "psutil>=5.9",   # subprocs.py 가 claude-code 워크로드 디스커버리에 사용
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
 [project.scripts]
-workerctl = "worker_control.cli:main"
+workerctl                   = "worker_control.cli:main"
+workerctl-hermes-projects   = "worker_control_hermes.projects:main"
+workerctl-hermes-heartbeat  = "worker_control_hermes.heartbeat:main"
+workerctl-hermes-report     = "worker_control_hermes.build_report:main"
+workerctl-hermes-subprocs   = "worker_control_hermes.subprocs:main"
+workerctl-hermes-migrate    = "worker_control_hermes.migrate_to_canonical_db:main"
 
 [tool.setuptools]
-packages = ["worker_control"]
+packages = ["worker_control", "worker_control_hermes"]
 
 [tool.setuptools.package-data]
-worker_control = ["py.typed", "static/*.html"]
+worker_control         = ["py.typed", "static/*.html"]
+worker_control_hermes  = ["*.sql"]
