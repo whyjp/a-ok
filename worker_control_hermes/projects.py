@@ -41,6 +41,14 @@ import sys
 import uuid as _uuid
 from pathlib import Path
 
+from worker_control.session_sync import (
+    ProjectNotRegistered,
+    SessionUpsert,
+    from_dispatcher_argv,
+    from_jsonl,
+    upsert_session,
+)
+
 DB_PATH = Path(os.environ.get("WORKER_PROJECTS_DB", r"D:/work-github/.worker-control/worker-control.sqlite3"))
 
 # hermes-agent stamps this on every tool-call child process; we keep it on
@@ -412,17 +420,29 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         # still lands in the spawn tab. Idempotent: never doubles up.
         base_name = _ensure_a_ok_prefix(base_name)
         now = _now()
+        # Single-writer path — every hermes_sessions INSERT/UPDATE goes
+        # through worker_control.session_sync.upsert_session. This call
+        # site used to inline the INSERT with its own column list, which
+        # diverged from cmd_session_sync_native's INSERT and meant the
+        # spawn dispatcher and native scanner could clobber each other.
+        # See worker_control/session_sync.py header for the locked-in
+        # rules (origin set-once, last_used_at monotonic, enrichment
+        # columns untouched on UPDATE).
         try:
-            conn.execute(
-                "INSERT INTO hermes_sessions(uuid, project_id, name, status, model, "
-                "permission_mode, brief, notes, created_at, last_used_at) "
-                "VALUES (?, ?, ?, 'active', ?, ?, ?, '', ?, ?)",
-                (uid, proj["id"], base_name, args.model, args.permission_mode,
-                 args.brief or "", now, now),
+            sess_id = upsert_session(
+                conn,
+                from_dispatcher_argv(
+                    name=base_name,
+                    uuid=uid,
+                    project_path=proj["folder_path"],
+                    brief=args.brief or "",
+                    model=args.model,
+                    permission_mode=args.permission_mode,
+                    created_at=now,
+                ),
             )
         except sqlite3.IntegrityError:
             raise SystemExit(f"Session UUID collision: {uid}")
-        sess_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
             "UPDATE hermes_projects_v SET last_used_at=?, use_count=use_count+1 WHERE id=?",
             (now, proj["id"]),
@@ -808,92 +828,68 @@ def _scan_native_session(jsonl_path: Path) -> dict:
 
 
 def cmd_session_sync_native(args: argparse.Namespace) -> None:
-    """Import claude-code native sessions from ~/.claude/projects into the registry."""
+    """Import claude-code native sessions from ~/.claude/projects into the registry.
+
+    Phase 2 PR #4: the per-row INSERT/UPDATE used to live inline here.
+    It now delegates to ``worker_control.session_sync.upsert_session`` so
+    the dispatcher and the native scanner can't drift in column lists or
+    UPDATE semantics. The auto-register-projects branch stays here
+    because ``upsert_session`` deliberately refuses to create projects
+    (it only writes ``hermes_sessions``).
+    """
     if not _CLAUDE_PROJECTS_DIR.is_dir():
         raise SystemExit(f"claude projects dir not found: {_CLAUDE_PROJECTS_DIR}")
 
     inserted, updated, skipped = 0, 0, 0
     now = _now()
     with _connect() as conn:
-        # Build a lookup of already-tracked UUIDs.
-        existing = {row["uuid"]: dict(row) for row in
-                    conn.execute("SELECT * FROM hermes_sessions").fetchall()}
+        existing_uuids = {
+            row["uuid"]
+            for row in conn.execute("SELECT uuid FROM hermes_sessions").fetchall()
+        }
 
         for proj_dir in _CLAUDE_PROJECTS_DIR.iterdir():
             if not proj_dir.is_dir():
                 continue
             for jsonl in proj_dir.glob("*.jsonl"):
-                uid = jsonl.stem
-                if not _UUID_RE.match(uid):
+                if not _UUID_RE.match(jsonl.stem):
                     continue
 
-                info = _scan_native_session(jsonl)
-                cwd = info["cwd"] or _decode_claude_project_dir(proj_dir.name)
-                if not cwd:
+                upsert = from_jsonl(jsonl)
+                if upsert is None:
                     skipped += 1
                     continue
 
-                # Find/create the matching project row.
-                norm = _norm_path(cwd)
+                # Auto-register the project if we haven't seen it yet —
+                # upsert_session itself never creates projects.
+                norm = upsert.project_path
                 proj_row = conn.execute(
-                    "SELECT * FROM hermes_projects_v WHERE folder_path=?", (norm,),
+                    "SELECT id FROM hermes_projects_v WHERE folder_path=?", (norm,),
                 ).fetchone()
                 if not proj_row:
-                    if args.auto_register_projects:
-                        repo = _detect_git_repo(norm)
-                        conn.execute(
-                            "INSERT INTO hermes_projects_v(folder_path, project_type, git_repo, "
-                            "display_name, description, learned_notes, created_at, "
-                            "last_used_at, use_count) VALUES (?, 'native', ?, ?, "
-                            "'(auto-registered from claude-code session sync)', '', ?, ?, 0)",
-                            (norm, repo, Path(norm).name, now, now),
-                        )
-                        proj_row = conn.execute(
-                            "SELECT * FROM hermes_projects_v WHERE folder_path=?", (norm,)
-                        ).fetchone()
-                    else:
+                    if not args.auto_register_projects:
                         skipped += 1
                         continue
-
-                name = info["custom_title"] or info["first_user_text"][:48] or f"native-{uid[:8]}"
-                last_used = info["last_event_at"] or info["first_user_at"] or now
-                first_seen = info["first_user_at"] or last_used
-
-                if uid in existing:
-                    # Don't downgrade a hermes-origin session — just refresh metadata.
-                    sets = ["last_used_at=?"]
-                    vals = [max(last_used, existing[uid]["last_used_at"])]
-                    if not existing[uid].get("model") and info["model"]:
-                        sets.append("model=?"); vals.append(info["model"])
-                    if existing[uid].get("origin") == "native":
-                        # Refresh native name; user may have set a custom-title
-                        # mid-session, or our parser previously latched onto a
-                        # system caveat row.
-                        sets.append("name=?"); vals.append(name)
-                        if info["first_user_text"]:
-                            sets.append("brief=?"); vals.append(info["first_user_text"][:200])
-                    vals.append(existing[uid]["id"])
+                    repo = _detect_git_repo(norm)
                     conn.execute(
-                        f"UPDATE hermes_sessions SET {', '.join(sets)} WHERE id=?", vals,
+                        "INSERT INTO hermes_projects_v(folder_path, project_type, git_repo, "
+                        "display_name, description, learned_notes, created_at, "
+                        "last_used_at, use_count) VALUES (?, 'native', ?, ?, "
+                        "'(auto-registered from claude-code session sync)', '', ?, ?, 0)",
+                        (norm, repo, Path(norm).name, now, now),
                     )
-                    updated += 1
-                    continue
 
-                brief = info["first_user_text"][:200]
-                notes = (
-                    f"[sync] native session from {jsonl}\n"
-                    f"        user/asst/sub = {info['user_count']}/"
-                    f"{info['assistant_count']}/{info['subagent_count']}\n"
-                    f"        claude version = {info['version'] or '?'}"
-                )
-                conn.execute(
-                    "INSERT INTO hermes_sessions(uuid, project_id, name, status, origin, model, "
-                    "brief, notes, created_at, last_used_at) "
-                    "VALUES (?, ?, ?, 'active', 'native', ?, ?, ?, ?, ?)",
-                    (uid, proj_row["id"], name, info["model"], brief, notes,
-                     first_seen, last_used),
-                )
-                inserted += 1
+                was_existing = upsert.uuid in existing_uuids
+                try:
+                    upsert_session(conn, upsert)
+                except ProjectNotRegistered:
+                    skipped += 1
+                    continue
+                if was_existing:
+                    updated += 1
+                else:
+                    inserted += 1
+                    existing_uuids.add(upsert.uuid)
 
         # Always reclassify at the end of a sync — the runs table is the
         # only authoritative signal for `origin`.
