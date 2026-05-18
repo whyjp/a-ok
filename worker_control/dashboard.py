@@ -196,96 +196,100 @@ def _hermes_ledger_to_dict(v: HermesSessionView) -> dict[str, Any]:
 def _collect_hermes_session_panel(
     ledger: list[HermesSessionView],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Build the "Hermes session" dashboard panel — one row per Hermes turn-by-
-    turn session that ever dispatched a claude run (we discover the link via
-    ``hermes_runs.hermes_session_id``). Each row carries the list of
-    claude-side ledger rows it spawned, plus a deep-link path to the JSON
-    transcript on disk so the FE can offer a "바로가기" button.
+    """Build the "hermes 세션" dashboard panel from the DB (read-only).
 
-    Hermes sessions that didn't spawn any claude run still get a row IF the
-    sessions/*.json file is discoverable, but with empty `spawned_claudes`.
-    Hermes sessions we only know about through ``hermes_runs.hermes_session_id``
-    but whose transcript file we can't find still show up (with `transcript`
-    set to ``None`` and a `discovered_via='runs_only'` flag).
+    Joins ``hermes_agent_sessions`` (populated by
+    ``worker_control.hermes_session_sync``) with the claude ledger rows that
+    point at each hermes session via ``hermes_runs.hermes_session_id``. No
+    disk reads — the sync worker is the only path that touches
+    ``~/AppData/Local/hermes/profiles/*/sessions/*.json``.
+
+    A row appears for every key present in EITHER source:
+      * ``transcript+runs`` — in both: agent session synced, claude runs link to it.
+      * ``transcript_only`` — synced agent session, no claude run links yet.
+      * ``runs_only``       — orphaned ``hermes_runs.hermes_session_id`` that
+                              we don't have a synced agent row for (may
+                              indicate the sync worker is behind, or the
+                              transcript file was deleted).
     """
-    from worker_control.hermes_profiles import discover_hermes_profiles
-
-    # 1. Group ledger rows by hermes_session_id (NULL skipped). We need a
-    #    second pass over the DB to read the column directly — the ledger
-    #    view doesn't carry it, and adding it there would bloat every row.
     rows_by_hsess: dict[str, list[dict[str, Any]]] = {}
+    agent_rows: dict[str, dict[str, Any]] = {}
+
     try:
         with connect_canonical() as conn:
-            cur = conn.execute(
-                "SELECT s.id AS sess_db_id, s.uuid, s.name, s.project_id, "
-                "       r.hermes_session_id "
-                "FROM hermes_runs r "
-                "JOIN hermes_sessions s ON s.id = r.session_id "
-                "WHERE r.hermes_session_id IS NOT NULL "
-                "GROUP BY s.id, r.hermes_session_id"
-            )
-            for r in cur.fetchall():
-                rows_by_hsess.setdefault(r["hermes_session_id"], []).append({
-                    "claude_session_db_id": r["sess_db_id"],
-                    "claude_uuid":          r["uuid"],
-                    "claude_name":          r["name"],
-                })
-    except Exception:
-        rows_by_hsess = {}
-
-    # 2. For every hermes profile we know about (default + worker), discover
-    #    its sessions/*.json files. Match by basename = session_id.
-    transcripts: dict[str, dict[str, Any]] = {}
-    for prof in discover_hermes_profiles():
-        sessions_dir = Path(prof.path) / "sessions"
-        if not sessions_dir.is_dir():
-            continue
-        for jf in sessions_dir.glob("session_*.json"):
-            # filename: session_<YYYYMMDD_HHMMSS_xxxxxx>.json
-            sid = jf.stem[len("session_"):]
-            if not sid:
-                continue
+            # Claude sessions per hermes session (via hermes_runs link).
             try:
-                st = jf.stat()
-            except OSError:
-                continue
-            transcripts[sid] = {
-                "profile_name":  prof.name,
-                "profile_path":  prof.path,
-                "transcript":    str(jf),
-                "transcript_size":  st.st_size,
-                "transcript_mtime":
-                    datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
-                            .strftime("%Y-%m-%dT%H:%M:%SZ"),
-            }
+                cur = conn.execute(
+                    "SELECT s.id AS sess_db_id, s.uuid, s.name, s.project_id, "
+                    "       r.hermes_session_id "
+                    "FROM hermes_runs r "
+                    "JOIN hermes_sessions s ON s.id = r.session_id "
+                    "WHERE r.hermes_session_id IS NOT NULL "
+                    "GROUP BY s.id, r.hermes_session_id"
+                )
+                for r in cur.fetchall():
+                    rows_by_hsess.setdefault(r["hermes_session_id"], []).append({
+                        "claude_session_db_id": r["sess_db_id"],
+                        "claude_uuid":          r["uuid"],
+                        "claude_name":          r["name"],
+                    })
+            except Exception:
+                pass
 
-    # 3. Merge — every key from either set produces a panel row.
-    all_keys = set(transcripts) | set(rows_by_hsess)
+            # Agent sessions from the synced table. If the table is missing
+            # (sync never ran), we get [] and fall through with whatever
+            # runs_only data we have.
+            try:
+                cur = conn.execute(
+                    "SELECT hermes_session_id, profile_name, profile_path, "
+                    "       transcript_path, transcript_size, transcript_mtime, "
+                    "       started_at, ended_at, model, turn_count, "
+                    "       first_message, last_message, cwd, total_cost_usd, "
+                    "       synced_at "
+                    "FROM hermes_agent_sessions"
+                )
+                for r in cur.fetchall():
+                    agent_rows[r["hermes_session_id"]] = dict(r)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    all_keys = set(agent_rows) | set(rows_by_hsess)
     rows_out: list[dict[str, Any]] = []
     for sid in all_keys:
-        t = transcripts.get(sid)
+        a = agent_rows.get(sid)
         spawned = rows_by_hsess.get(sid, [])
         rows_out.append({
             "hermes_session_id":  sid,
-            "profile_name":       t["profile_name"]  if t else None,
-            "profile_path":       t["profile_path"]  if t else None,
-            "transcript":         t["transcript"]    if t else None,
-            "transcript_size":    t["transcript_size"]  if t else 0,
-            "transcript_mtime":   t["transcript_mtime"] if t else None,
-            "discovered_via":     "transcript+runs" if (t and spawned)
-                                  else ("transcript_only" if t else "runs_only"),
+            "profile_name":       a["profile_name"]      if a else None,
+            "profile_path":       a["profile_path"]      if a else None,
+            "transcript":         a["transcript_path"]   if a else None,
+            "transcript_size":    a["transcript_size"]   if a else 0,
+            "transcript_mtime":   a["transcript_mtime"]  if a else None,
+            "started_at":         a["started_at"]        if a else None,
+            "ended_at":           a["ended_at"]          if a else None,
+            "model":              a["model"]             if a else None,
+            "turn_count":         a["turn_count"]        if a else 0,
+            "first_message":      a["first_message"]     if a else None,
+            "last_message":       a["last_message"]      if a else None,
+            "cwd":                a["cwd"]               if a else None,
+            "total_cost_usd":     a["total_cost_usd"]    if a else None,
+            "synced_at":          a["synced_at"]         if a else None,
+            "discovered_via":     "transcript+runs" if (a and spawned)
+                                  else ("transcript_only" if a else "runs_only"),
             "spawned_claudes":    spawned,
             "spawned_count":      len(spawned),
         })
-    # Newest first by transcript_mtime (None last).
     rows_out.sort(
-        key=lambda r: (r["transcript_mtime"] or "", r["hermes_session_id"]),
+        key=lambda r: (r["transcript_mtime"] or r["started_at"] or "",
+                       r["hermes_session_id"]),
         reverse=True,
     )
     counters = {
-        "hermes_agent_sessions":         len(rows_out),
-        "hermes_agent_with_spawn":       sum(1 for r in rows_out if r["spawned_count"]),
-        "hermes_agent_orphaned_runs":    sum(
+        "hermes_agent_sessions":      len(rows_out),
+        "hermes_agent_with_spawn":    sum(1 for r in rows_out if r["spawned_count"]),
+        "hermes_agent_orphaned_runs": sum(
             1 for r in rows_out if r["discovered_via"] == "runs_only"
         ),
     }

@@ -194,6 +194,50 @@ def _has_hermes_tables(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def auto_reclassify_origins(conn: sqlite3.Connection) -> int:
+    """Recompute ``hermes_sessions.origin`` from the prefix rule.
+
+    Single UPDATE statement, idempotent. Sets ``origin='spawned'`` iff the
+    session row's own name OR ANY associated ``hermes_runs.name`` starts with
+    a configured spawn prefix; ``'native'`` otherwise.
+
+    This deliberately diverges from ``worker_control_hermes/projects.py::
+    _reclassify_origins`` which uses the legacy ``mode='print'`` signal —
+    the dashboard classifier is prefix-driven (see ``_classify`` above), so
+    we keep the ``origin`` SQL column aligned with the prefix rule. Called
+    on every snapshot read so newly-allocated sessions appear in the spawn
+    tab without a manual ``workerctl session reclassify``.
+
+    Returns the number of sessions now classified as spawned.
+    """
+    prefixes = _all_spawn_prefixes()
+    if not prefixes:
+        return 0
+    # Build OR-chains for both the session name and the runs name. We use
+    # ``GLOB`` with a trailing ``*`` so SQLite avoids the ``LIKE`` planner
+    # cost of escaping ``%`` / ``_`` in user prefixes (a-ok: contains neither
+    # today, but be conservative for forward-compat).
+    sess_pred = " OR ".join(["name GLOB ?"] * len(prefixes))
+    run_pred  = " OR ".join(["r.name GLOB ?"] * len(prefixes))
+    args = tuple(f"{p}*" for p in prefixes) * 2
+    sql = (
+        "UPDATE hermes_sessions SET origin = CASE "
+        f" WHEN ({sess_pred}) "
+        f" OR EXISTS (SELECT 1 FROM hermes_runs r "
+        f"            WHERE r.session_id = hermes_sessions.id AND ({run_pred})) "
+        " THEN 'spawned' ELSE 'native' END"
+    )
+    try:
+        conn.execute(sql, args)
+    except sqlite3.OperationalError:
+        # hermes_runs missing — nothing to reclassify against.
+        return 0
+    sp = conn.execute(
+        "SELECT COUNT(*) FROM hermes_sessions WHERE origin='spawned'"
+    ).fetchone()[0]
+    return sp
+
+
 def list_hermes_sessions(limit: int | None = None) -> list[HermesSessionView]:
     """Return one HermesSessionView per row in `hermes_sessions`, joined with
     the most-recent run (mode + status + name) and run-count aggregates.
@@ -206,6 +250,10 @@ def list_hermes_sessions(limit: int | None = None) -> list[HermesSessionView]:
     with connect() as conn:
         if not _has_hermes_tables(conn):
             return []
+        # Cheap idempotent UPDATE — keeps `origin` in sync with the prefix
+        # rule so the spawn tab counter reflects sessions allocated since
+        # the last refresh, without the user running `session reclassify`.
+        auto_reclassify_origins(conn)
         rows = conn.execute(_LIST_SQL).fetchall()
 
     out: list[HermesSessionView] = []

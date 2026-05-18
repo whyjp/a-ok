@@ -405,6 +405,12 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         base_name = args.name or _slugify(args.brief or "", "session")
         if not base_name:
             raise SystemExit("Session name is empty after slugify; pass --name")
+        # Stamp the reserved a-ok namespace on the session name too — the
+        # dashboard classifier matches name OR last_run_name with this
+        # prefix, so a freshly-allocated session with 0 runs (e.g. a race
+        # between INSERT into hermes_sessions and INSERT into hermes_runs)
+        # still lands in the spawn tab. Idempotent: never doubles up.
+        base_name = _ensure_a_ok_prefix(base_name)
         now = _now()
         try:
             conn.execute(
@@ -425,7 +431,7 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         # Record the inaugural run.
         run_name = _run_name(base_name, 1)
         mode = "print" if args.print else "interactive"
-        cmd = _build_claude_command(
+        raw_cmd = _build_claude_command(
             cwd=proj["folder_path"],
             uid=uid,
             name=run_name,
@@ -440,9 +446,20 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         conn.execute(
             "INSERT INTO hermes_runs(session_id, run_index, name, mode, command, status, started_at, hermes_session_id) "
             "VALUES (?, ?, ?, ?, ?, 'started', ?, ?)",
-            (sess_id, 1, run_name, mode, cmd, now, _HERMES_SESSION_ID),
+            (sess_id, 1, run_name, mode, raw_cmd, now, _HERMES_SESSION_ID),
         )
         run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # Wrap the emitted command so it auto-calls `run end` on exit.
+        # Stored under hermes_runs.command so the dashboard / audit shows
+        # exactly what was emitted to the PM agent. ``--no-auto-close``
+        # opts back into the legacy raw form.
+        auto_close = not getattr(args, "no_auto_close", False)
+        cmd = _wrap_self_close(raw_cmd, run_id) if auto_close else raw_cmd
+        if auto_close:
+            conn.execute(
+                "UPDATE hermes_runs SET command=? WHERE id=?",
+                (cmd, run_id),
+            )
         # The brand-new session is now eligible for `spawned` classification
         # if this first run is print-mode. Reclassify once.
         _reclassify_origins(conn)
@@ -456,6 +473,8 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         "run_name": run_name,
         "mode": mode,
         "command": cmd,
+        "command_raw": raw_cmd,
+        "auto_close": auto_close,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -463,9 +482,45 @@ def cmd_session_start(args: argparse.Namespace) -> None:
     print(f"session uuid : {uid}")
     print(f"session name : {base_name}")
     print(f"project      : {proj['folder_path']}")
-    print(f"run #{run_id} (idx 1, mode={mode})")
+    print(f"run #{run_id} (idx 1, mode={mode}, auto_close={'on' if auto_close else 'off'})")
     print(f"  --name     : {run_name}")
     print(f"  command    : {cmd}")
+
+
+def _wrap_self_close(raw_cmd: str, run_id: int) -> str:
+    """Wrap ``raw_cmd`` in a bash subshell that calls ``run end`` on exit.
+
+    The wrapper is bash-only (git-bash / MSYS on Windows, regular bash on
+    POSIX). On Windows cmd.exe / PowerShell it will not parse — this is
+    deliberate: the Hermes terminal tool runs commands through bash and
+    that is the supported surface.
+
+    Semantics:
+      * EXIT trap fires on normal exit AND signal-induced exit
+        (INT/TERM/HUP). SIGKILL is the only path that bypasses it, which
+        is exactly what the ``runs sweep`` safety net is for.
+      * ``$?`` is captured as the very first statement of the trap so
+        nothing else can clobber it.
+      * The outer subshell ``( … )`` scopes the trap to the wrapped
+        command — pasting this into an interactive shell will NOT leave
+        a stray EXIT trap behind in that shell.
+      * The wrapper's exit code IS the original claude exit code: bash
+        keeps the subshell's last-command rc and the EXIT trap does
+        not override it (no explicit ``exit`` inside the trap).
+      * The ``run end`` call is best-effort (``|| true``) so a missing
+        entry-point on PATH never masks the real exit code.
+    """
+    # Single-quoted trap body keeps every $… literal until the trap
+    # actually fires. The raw command lives OUTSIDE this quoted span,
+    # so its own shlex-quoted args (which use single quotes too) do
+    # not collide.
+    trap_body = (
+        "__rc=$?; "
+        f"workerctl-hermes-projects run end {run_id} "
+        "--status $( [ \"$__rc\" = \"0\" ] && echo done || echo failed ) "
+        "--note \"exit=$__rc\" >/dev/null 2>&1 || true"
+    )
+    return f"( trap '{trap_body}' EXIT; {raw_cmd} )"
 
 
 def _build_claude_command(*, cwd: str, uid: str, name: str,
@@ -864,8 +919,18 @@ def _next_run_index(conn: sqlite3.Connection, session_id: int) -> int:
     return (row["m"] or 0) + 1
 
 
+A_OK_PREFIX = "a-ok:"
+
+
+def _ensure_a_ok_prefix(base: str) -> str:
+    """Stamp the reserved ``a-ok:`` namespace onto ``base`` (idempotent)."""
+    if base.startswith(A_OK_PREFIX):
+        return base
+    return A_OK_PREFIX + base
+
+
 def _run_name(base: str, idx: int) -> str:
-    # Format: "a-ok:<base>-r<idx>"
+    # Format: "a-ok:<base>-r<idx>".
     # The `a-ok:` prefix is RESERVED for sessions spawned by the a-ok
     # (worker-control) dispatcher running inside this Hermes worker profile.
     # The dashboard's classifier (worker_control.hermes_ledger) treats this
@@ -875,19 +940,23 @@ def _run_name(base: str, idx: int) -> str:
     # by a `/rename` (the prefix lives on hermes_runs.name, not on the
     # user-facing claude-side label).
     #
-    # The colon (a-ok:) — not a dash — is intentional: it visibly marks
-    # the run name as carrying a namespace, distinguishes a-ok-owned runs
-    # from any historical `a-ok-...` slug a human might have chosen for
-    # their own task names, and reads as "a-ok namespace, session id X".
+    # ``base`` may already carry the prefix (we now stamp it on
+    # ``hermes_sessions.name`` at session_start too, so the spawn classifier
+    # still works when a session has 0 runs); _run_name MUST be idempotent
+    # against that to avoid "a-ok:a-ok:..." double-stamps.
     #
     # If you change this, also update:
     #   * D:/work-github/a-ok worker_control/hermes_ledger.py
     #     (A_OK_SPAWN_PREFIX constant)
     #   * hermes-pm-dispatcher-profile skill (classifier docs)
-    prefix = "a-ok:"
+    base = _ensure_a_ok_prefix(base)
     suffix = f"-r{idx}"
-    max_base = max(8, 80 - len(prefix) - len(suffix))
-    return prefix + base[:max_base] + suffix
+    max_total = 80
+    if len(base) + len(suffix) <= max_total:
+        return base + suffix
+    # truncate the *post-prefix* portion only, never the prefix itself
+    keep = max(len(A_OK_PREFIX) + 8, max_total - len(suffix))
+    return base[:keep] + suffix
 
 
 def cmd_run_start(args: argparse.Namespace) -> None:
@@ -903,7 +972,7 @@ def cmd_run_start(args: argparse.Namespace) -> None:
         run_name = _run_name(sess["name"], idx)
         mode = "print" if args.print else "interactive"
 
-        cmd = _build_claude_command(
+        raw_cmd = _build_claude_command(
             cwd=proj["folder_path"],
             uid=sess["uuid"],
             name=run_name,
@@ -920,15 +989,22 @@ def cmd_run_start(args: argparse.Namespace) -> None:
         conn.execute(
             "INSERT INTO hermes_runs(session_id, run_index, name, mode, command, status, started_at, hermes_session_id) "
             "VALUES (?, ?, ?, ?, ?, 'started', ?, ?)",
-            (sess["id"], idx, run_name, mode, cmd, now, _HERMES_SESSION_ID),
+            (sess["id"], idx, run_name, mode, raw_cmd, now, _HERMES_SESSION_ID),
         )
+        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        auto_close = not getattr(args, "no_auto_close", False)
+        cmd = _wrap_self_close(raw_cmd, run_id) if auto_close else raw_cmd
+        if auto_close:
+            conn.execute(
+                "UPDATE hermes_runs SET command=? WHERE id=?",
+                (cmd, run_id),
+            )
         # New run may promote this session to 'spawned' (e.g. first print run
         # after a chain of interactive ones). Idempotent.
         _reclassify_origins(conn)
         conn.execute(
             "UPDATE hermes_sessions SET last_used_at=? WHERE id=?", (now, sess["id"]),
         )
-        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     payload = {
         "run_id": run_id,
@@ -937,12 +1013,14 @@ def cmd_run_start(args: argparse.Namespace) -> None:
         "name": run_name,
         "project": proj["folder_path"],
         "command": cmd,
+        "command_raw": raw_cmd,
+        "auto_close": auto_close,
         "mode": mode,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
-    print(f"run #{run_id} (idx {idx}, mode={mode})")
+    print(f"run #{run_id} (idx {idx}, mode={mode}, auto_close={'on' if auto_close else 'off'})")
     print(f"  session  : {sess['uuid']}  ({sess['name']})")
     print(f"  --name   : {run_name}")
     print(f"  project  : {proj['folder_path']}")
@@ -985,6 +1063,71 @@ def cmd_run_end(args: argparse.Namespace) -> None:
     print(f"run #{row['id']} → {args.status}")
     if promoted:
         print(f"session {promoted[0]} ({promoted[1]}) → done  [spawn auto-promote]")
+
+
+def _stale_started_a_ok_runs(conn: sqlite3.Connection, max_age_hours: float) -> list[sqlite3.Row]:
+    """Return rows in ``hermes_runs`` that look orphaned.
+
+    Criteria:
+      * ``status = 'started'``
+      * ``name LIKE 'a-ok:%'`` — only sweep dispatcher-owned runs
+      * ``started_at`` older than ``max_age_hours`` ago
+
+    The cutoff comparison uses ISO-8601 lexicographic ordering, which
+    works correctly for UTC ``T``-separated stamps with seconds resolution
+    (the only format ``_now()`` emits).
+    """
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(hours=max_age_hours)).isoformat(timespec="seconds")
+    return conn.execute(
+        "SELECT r.*, s.uuid AS session_uuid, s.name AS session_name "
+        "FROM hermes_runs r "
+        "JOIN hermes_sessions s ON s.id = r.session_id "
+        "WHERE r.status = 'started' AND r.name LIKE 'a-ok:%' AND r.started_at < ? "
+        "ORDER BY r.started_at ASC",
+        (cutoff,),
+    ).fetchall()
+
+
+def cmd_runs_sweep(args: argparse.Namespace) -> None:
+    """Mark long-stuck `started` a-ok: runs as `failed` (safety-net).
+
+    Belt-and-suspenders for the rare cases where the trap-based wrapper
+    is bypassed: SIGKILL on the bash subshell, OOM-killed claude binary,
+    machine power loss between trap-fire and the SQLite UPDATE.
+
+    Auto-promote in ``cmd_run_end`` only fires on ``--status done``,
+    so a swept (failed) run leaves its session in ``active`` — by
+    design. The user can then inspect and manually decide whether to
+    abandon the session or revive it.
+    """
+    with _connect() as conn:
+        rows = _stale_started_a_ok_runs(conn, args.max_age_hours)
+        if not rows:
+            print(f"(no stale a-ok: started runs older than {args.max_age_hours}h)")
+            return
+        now = _now()
+        note = f"sweep: started_at>{args.max_age_hours}h no end-call"
+        if args.dry_run:
+            print(f"DRY-RUN — would mark {len(rows)} run(s) as failed "
+                  f"(cutoff={args.max_age_hours}h):")
+        else:
+            for r in rows:
+                conn.execute(
+                    "UPDATE hermes_runs SET status='failed', ended_at=?, note=? WHERE id=?",
+                    (now, note, r["id"]),
+                )
+            print(f"swept {len(rows)} run(s) (cutoff={args.max_age_hours}h):")
+        for r in rows:
+            print(f"  run #{r['id']:>5}  {r['started_at']}  "
+                  f"session={r['session_uuid'][:8]}  name={r['name']}")
+        if args.json:
+            print(json.dumps({
+                "swept_count": 0 if args.dry_run else len(rows),
+                "candidates": [dict(r) for r in rows],
+                "dry_run": bool(args.dry_run),
+                "max_age_hours": args.max_age_hours,
+            }, ensure_ascii=False, indent=2))
 
 
 def cmd_runs_list(args: argparse.Namespace) -> None:
@@ -1084,6 +1227,11 @@ def main() -> None:
     ss_start.add_argument("--allowed-tools",
                           help='value passed verbatim to claude --allowedTools '
                                '(e.g. "Read,Edit,Bash")')
+    ss_start.add_argument("--no-auto-close", action="store_true",
+                          help="emit the raw claude command without the bash "
+                               "self-close wrapper (legacy behavior; the PM "
+                               "agent must then call `run end` manually). "
+                               "Default: wrap so the run auto-closes on exit.")
     ss_start.add_argument("--json", action="store_true")
     ss_start.set_defaults(fn=cmd_session_start)
 
@@ -1149,6 +1297,9 @@ def main() -> None:
     rr_start.add_argument("--prompt")
     rr_start.add_argument("--max-turns", type=int)
     rr_start.add_argument("--allowed-tools")
+    rr_start.add_argument("--no-auto-close", action="store_true",
+                          help="emit the raw claude command without the bash "
+                               "self-close wrapper (legacy behavior).")
     rr_start.add_argument("--json", action="store_true")
     rr_start.set_defaults(fn=cmd_run_start)
 
@@ -1158,12 +1309,36 @@ def main() -> None:
     rr_end.add_argument("--note", help="freeform outcome note")
     rr_end.set_defaults(fn=cmd_run_end)
 
-    runs = sub.add_parser("runs", help="list runs (timeline view)")
+    runs = sub.add_parser("runs", help="list runs / sweep stale runs")
+    # Legacy flags stay on the `runs` parser itself so the existing
+    # documented form `runs --session <key> --status started` keeps
+    # working without forcing the user to write `runs list ...`.
     runs.add_argument("--session", help="filter by session key")
     runs.add_argument("--status", choices=["started", "done", "failed"])
     runs.add_argument("--limit", type=int, default=50)
     runs.add_argument("--json", action="store_true")
     runs.set_defaults(fn=cmd_runs_list)
+    runs_sub = runs.add_subparsers(dest="runs_cmd")
+
+    runs_list = runs_sub.add_parser("list", help="list runs (default if no subcommand)")
+    runs_list.add_argument("--session", help="filter by session key")
+    runs_list.add_argument("--status", choices=["started", "done", "failed"])
+    runs_list.add_argument("--limit", type=int, default=50)
+    runs_list.add_argument("--json", action="store_true")
+    runs_list.set_defaults(fn=cmd_runs_list)
+
+    runs_sweep = runs_sub.add_parser(
+        "sweep",
+        help="mark long-stuck `started` a-ok: runs as failed (safety-net "
+             "for runs whose self-close wrapper was bypassed, e.g. SIGKILL).",
+    )
+    runs_sweep.add_argument("--max-age-hours", type=float, default=24.0,
+                            help="only sweep runs whose started_at is older "
+                                 "than this many hours (default 24).")
+    runs_sweep.add_argument("--dry-run", action="store_true",
+                            help="report what would be swept without writing.")
+    runs_sweep.add_argument("--json", action="store_true")
+    runs_sweep.set_defaults(fn=cmd_runs_sweep)
 
     args = p.parse_args()
     if args.db:

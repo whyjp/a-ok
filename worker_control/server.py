@@ -46,6 +46,7 @@ from worker_control.dashboard import (
     snapshot_to_payload,
     static_dashboard_html,
 )
+from worker_control.hermes_session_sync import PeriodicSyncWorker, sync_once
 from worker_control.paths import db_path, runtime_root
 
 
@@ -189,6 +190,7 @@ class DashboardServer(ThreadingHTTPServer):
         log_sink=None,
         db_path_override: str | os.PathLike[str] | None = None,
         runtime_root_override: str | os.PathLike[str] | None = None,
+        hermes_sync_interval_s: float | None = 60.0,
     ) -> None:
         if db_path_override is not None:
             os.environ["WORKER_CONTROL_DB"] = str(db_path_override)
@@ -199,6 +201,39 @@ class DashboardServer(ThreadingHTTPServer):
         self.log_sink = log_sink
         self.db_path: Path = db_path()
         self.runtime_root: Path = runtime_root()
+        # Run one synchronous sync at startup so the FE sees populated rows
+        # on its first poll; the periodic worker takes over for refresh.
+        # Errors are intentionally swallowed — sync failures must NOT take
+        # the BFF down (they're observable via /api/health later if needed).
+        self._hermes_sync: PeriodicSyncWorker | None = None
+        try:
+            sync_once()
+        except Exception as exc:
+            self._log(f"[hermes-sync] initial sync failed: {exc}")
+        if hermes_sync_interval_s and hermes_sync_interval_s > 0:
+            self._hermes_sync = PeriodicSyncWorker(
+                interval_s=hermes_sync_interval_s,
+                on_error=lambda exc: self._log(
+                    f"[hermes-sync] periodic sync failed: {exc}"
+                ),
+            )
+            self._hermes_sync.start()
+
+    def _log(self, msg: str) -> None:
+        if self.log_sink is None:
+            return
+        try:
+            self.log_sink.write(msg + "\n")
+            self.log_sink.flush()
+        except Exception:
+            pass
+
+    def server_close(self) -> None:
+        try:
+            if self._hermes_sync is not None:
+                self._hermes_sync.stop(timeout=1.0)
+        finally:
+            super().server_close()
 
     @property
     def host(self) -> str:
@@ -226,6 +261,7 @@ def make_server(
     log_sink=None,
     db_path_override: str | os.PathLike[str] | None = None,
     runtime_root_override: str | os.PathLike[str] | None = None,
+    hermes_sync_interval_s: float | None = 60.0,
 ) -> DashboardServer:
     """``DashboardServer`` 인스턴스를 만든다 (서빙 시작은 호출자 책임)."""
     return DashboardServer(
@@ -233,6 +269,7 @@ def make_server(
         native_limit=native_limit, log_sink=log_sink,
         db_path_override=db_path_override,
         runtime_root_override=runtime_root_override,
+        hermes_sync_interval_s=hermes_sync_interval_s,
     )
 
 

@@ -276,6 +276,51 @@ killed      → 사용자에 의한 명시적 종료
 - `public_reference` 정책은 *루트 기반* 이다. 심볼릭 링크/네트워크 드라이브로
   우회되지 않도록 정규화에 신경 쓰지만, 의도적 우회는 차단하지 않는다.
 
+## Hermes 디스패처 run lifecycle (자동 종료)
+
+`workerctl-hermes-projects session start` / `run start` 가 PM 에이전트에게
+넘기는 `command` 는 더 이상 raw `claude ...` 한 줄이 아니라 bash subshell
+래퍼다. 안쪽 claude 가 어떤 경로로 끝나든 (정상 종료, 비-0 exit, ctrl-c,
+SIGTERM, SIGHUP) `EXIT` trap 이 `workerctl-hermes-projects run end <id>
+--status done|failed --note "exit=<rc>"` 를 호출해 row 가 `started` 로
+박혀버리는 누수를 차단한다. 원래 exit code 는 보존된다.
+
+PM 에이전트는 JSON 출력의 `command` 필드를 **변형 없이 그대로 실행**한다.
+별도로 `run end` 를 부를 필요가 없다. 레거시 동작 (raw 명령) 이 필요하면
+`--no-auto-close` 플래그를 추가하면 된다.
+
+JSON 출력 추가 필드:
+
+- `command` — 래핑된 형태. PM 이 verbatim 실행.
+- `command_raw` — 래핑 전 원본 (디버깅/로그용).
+- `auto_close` — `true|false`.
+
+bash 전용. cmd.exe / PowerShell 사용자는 `--no-auto-close` 로 raw 형태를
+받고 직접 `run end` 를 호출한다.
+
+### Sweeper (안전망)
+
+SIGKILL / 정전 등으로 trap 자체가 실행되지 못한 row 를 청소한다:
+
+```bash
+workerctl-hermes-projects runs sweep [--max-age-hours 24] [--dry-run] [--json]
+```
+
+조건:
+- `status = 'started'`
+- `name LIKE 'a-ok:%'` (디스패처 소유 run 만 — 다른 prefix 는 절대 안 건드림)
+- `started_at` 가 `--max-age-hours` 보다 오래됨
+
+청소된 row 는 `status='failed'` + sweep 사유 note 가 박힌다. 실패 run 은
+세션을 자동 종료하지 않는다 (사람이 확인하라는 의도).
+
+heartbeat (`workerctl-hermes-heartbeat`) 가 sweep 후보를 자체 snapshot 의
+🧹 SWEEP CANDIDATES 섹션에 노출한다. 24h 임계 누수가 있으면 같은 화면에서
+즉시 보인다.
+
+상세 패턴 / PM-side SOUL.md 권고 사항: `hermes-pm-dispatcher-profile` 스킬의
+`references/run-lifecycle-hooks.md`.
+
 ## 미래 확장 (계획만)
 
 - GitHub Issues / Linear 폴링 → 새 워커 자동 스폰
