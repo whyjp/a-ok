@@ -159,6 +159,7 @@ def _load_db_sessions() -> list[dict]:
             "name":              v.name,
             "origin":            v.origin,
             "status":            v.status,
+            "display_status":    v.display_status,
             "brief":             v.brief,
             "model":             v.model,
             "last_used_at":      v.last_used_at,
@@ -169,6 +170,10 @@ def _load_db_sessions() -> list[dict]:
             "claude_status_at":  v.claude_status_at,
             "proj_name":         v.project_name,
             "proj_path":         v.project_path,
+            # Tool-invocation total — surfaced in Slack as a compact
+            # `🔧 tools×N` chip. The actual command/snippet text is NOT
+            # propagated; only the count survives this hop.
+            "msg_tool":          v.msg_tool,
             "runs":              runs_by_sid.get(v.id, []),
         })
     return out
@@ -597,21 +602,24 @@ def _line(s: dict) -> str:
             continue
         icon = "🔧" if st == "in_progress" else "⏳"
         bits.append(f"        {icon} task #{t.get('id','?')}: {subj[:140]}")
-    # Workload subprocesses owned by this session — the bit the heartbeat
-    # used to silently miss. We render up to 3 alive + 2 just-ended per
-    # session so the line stays readable; the rest live in the DB.
+    # Workload subprocesses owned by this session — surfaced as a name + pid
+    # only. The cmdline / arg vector was historically rendered inline, but
+    # it leaks command snippets the user explicitly asked not to see in
+    # Slack; the DB still has the full cmdline for forensics.
     for sp in (s.get("_subprocs_alive") or [])[:3]:
         age = _fmt_age(_parse_iso(sp.get("started_at")))
-        cmd_excerpt = (sp.get("cmdline") or "")[:90]
         bits.append(f"        ⚙ {sp.get('name','?')}  pid={sp.get('pid')}  (started {age})")
-        if cmd_excerpt:
-            bits.append(f"            {cmd_excerpt}")
     extra_alive = len(s.get("_subprocs_alive") or []) - 3
     if extra_alive > 0:
         bits.append(f"        ⚙ +{extra_alive} more alive subproc(s)")
     for sp in (s.get("_subprocs_just_ended") or [])[:2]:
         age = _fmt_age(_parse_iso(sp.get("ended_at")))
         bits.append(f"        ☑ ended {sp.get('name','?')} pid={sp.get('pid')} ({age})")
+    # Compact tool-call counter — only the number survives, not the
+    # individual Bash/Edit/Write invocations or their argument strings.
+    tools_n = int(s.get("msg_tool") or 0)
+    if tools_n:
+        bits.append(f"        🔧 tools×{tools_n}")
     return "\n".join(bits)
 
 
@@ -754,20 +762,16 @@ def _section_text_for(s: dict, bucket: str) -> str:
         sm = subj[:160] + ("…" if len(subj) > 160 else "")
         icon = "🔧" if st == "in_progress" else "⏳"
         lines.append(f"{icon} *task* `#{t.get('id','?')}`: {_slack_esc(sm)}")
-    # Workload subprocesses — surface them inline in the session card so the
-    # user can see "still chewing on the Go pipeline" even when the jsonl is
-    # silent. Cap at 3 alive + 2 just-ended; the DB has the rest.
+    # Workload subprocesses — name + pid only, no cmdline. The argv
+    # contains tool snippets the user asked us not to surface in Slack;
+    # the DB still has it for forensics.
     for sp in (s.get("_subprocs_alive") or [])[:3]:
         age = _fmt_age(_parse_iso(sp.get("started_at")))
-        cmd = (sp.get("cmdline") or "").strip()
         head = (
             f"⚙ `{_slack_esc(sp.get('name','?'))}` pid `{sp.get('pid')}` "
             f"_started {_slack_esc(age)}_"
         )
         lines.append(head)
-        if cmd:
-            cm = cmd[:160] + ("…" if len(cmd) > 160 else "")
-            lines.append("    `" + _slack_esc(cm) + "`")
     extra_alive = len(s.get("_subprocs_alive") or []) - 3
     if extra_alive > 0:
         lines.append(f"⚙ _+{extra_alive} more alive subproc(s)_")
@@ -777,6 +781,11 @@ def _section_text_for(s: dict, bucket: str) -> str:
             f"☑ _ended_ `{_slack_esc(sp.get('name','?'))}` pid `{sp.get('pid')}` "
             f"_({_slack_esc(age)})_"
         )
+    # Compact tool-call counter — surfaced as a single chip on the tail
+    # row alongside other metadata.
+    tools_n = int(s.get("msg_tool") or 0)
+    if tools_n:
+        tail_bits.append(f"🔧 tools×{tools_n}")
     if tail_bits:
         lines.append("_" + "  ·  ".join(_slack_esc(b) for b in tail_bits) + "_")
 
