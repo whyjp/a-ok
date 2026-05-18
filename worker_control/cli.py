@@ -120,7 +120,17 @@ def cmd_projects_list(args: argparse.Namespace) -> int:
     return 0
 
 
+_LEGACY_SESSIONS_LIST_DEPRECATION = (
+    "warning: `workerctl sessions` is deprecated; use `workerctl session "
+    "sync-all` + the dashboard's Hermes/Native tabs (Phase 2 unified "
+    "hermes_sessions ledger). See docs/operations.md "
+    "\"Legacy `workerctl sessions list` (deprecated)\" for the migration "
+    "table."
+)
+
+
 def cmd_sessions_list(_args: argparse.Namespace) -> int:
+    print(_LEGACY_SESSIONS_LIST_DEPRECATION, file=sys.stderr)
     rows = sessions.list_sessions()
     if not rows:
         print("(no sessions)")
@@ -402,11 +412,20 @@ def _build_parser() -> argparse.ArgumentParser:
     pl2.add_argument("--git-only", action="store_true")
     pl2.set_defaults(func=cmd_projects_list)
 
-    # sessions
-    ss = sub.add_parser("sessions", help="manage worker sessions")
+    # sessions (legacy `worker_sessions` table — Phase 2 deprecates this in
+    # favour of `workerctl session ...` against the unified hermes_sessions
+    # ledger; see docs/operations.md "legacy `workerctl sessions`" section).
+    ss = sub.add_parser(
+        "sessions",
+        help="[DEPRECATED] legacy worker_sessions ops — use `workerctl session`",
+    )
     ss_sub = ss.add_subparsers(dest="action", required=True)
 
-    sl = ss_sub.add_parser("list", help="list sessions")
+    sl = ss_sub.add_parser(
+        "list",
+        help="[DEPRECATED] list legacy worker_sessions rows "
+             "(use `workerctl session list` for the unified ledger)",
+    )
     sl.set_defaults(func=cmd_sessions_list)
 
     sst = ss_sub.add_parser("start", help="start a new session")

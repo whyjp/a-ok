@@ -170,6 +170,98 @@ argparse 기반. 외부 의존성 없음. 서브커맨드 트리:
 오케스트레이션 정책, 환경 변수 가이드, 본 worker-control 과 함께 쓰이는
 정책 문서를 모은다. 런타임 DB/로그/시크릿은 포함하지 않는다.
 
+## Phase 2 — 단일 SessionRepository (PR #4–#7)
+
+Phase 2 는 ``hermes_sessions`` 가 **한 곳의 writer** 와 **한 곳의 reader** 만
+가지도록 정리한 작업이다. 사실상 모든 dashboard / heartbeat / build_report
+화면은 같은 SQLite 뷰를 통과한다.
+
+```
++-----------------------------+   upsert    +----------------------------+
+|  Disk sources               | ----------> |  session_sync (writer)     |
+|  · ~/.claude/projects/*.jsonl              |  worker_control/           |
+|  · <hermes_home>/profiles/  |              |   session_sync.py          |
+|    sessions/session_*.json  |              |  · from_jsonl              |
+|  · 디스패처 argv             |              |  · from_profile_session…   |
++-----------------------------+              |  · from_dispatcher_argv    |
+                                             |  · upsert_session          |
+                                             |  · sync_all() (cron 진입)  |
+                                             +-------------+--------------+
+                                                           |
+                                                           v
+                                          +----------------------------------+
+                                          |  SQLite (single canonical DB)    |
+                                          |   hermes_sessions  (authoritative)|
+                                          |   + hermes_runs / hermes_subprocs |
+                                          |   + hermes_agent_sessions         |
+                                          |   + 5 legacy-parity child tables  |
+                                          +----------------+-----------------+
+                                                           |
+                                                           v
+                                          +----------------------------------+
+                                          |  session_view (reader, 단일)     |
+                                          |  worker_control/session_view.py  |
+                                          |  · list_sessions(...)             |
+                                          |  · 조인만 — 디스크 접근 없음     |
+                                          |  · 분류(spawn/native) 규칙 공유  |
+                                          +----------------+-----------------+
+                                                           |
+                              +----------------------------+----------------------------+
+                              v                            v                            v
+              +-------------------------+    +-------------------------+    +-------------------------+
+              | dashboard.collect_      |    | heartbeat.classify_     |    | build_report (Slack/    |
+              | snapshot (HTTP BFF)     |    | sessions (30분 cron)    |    |  iShare 빌드)           |
+              | http://127.0.0.1:8765/  |    |                         |    |                         |
+              +-------------------------+    +-------------------------+    +-------------------------+
+```
+
+### 부속 테이블 (parity payload)
+
+`session_view` 가 각 ledger row 와 함께 조인해 반환하는 자식 테이블:
+
+| 테이블 | 역할 |
+|--------|------|
+| `session_pr_links`     | 세션이 만들거나 갱신한 PR 번호/URL/제목/병합 시각 |
+| `session_files_touched`| 세션이 만진 파일 경로 + insertions/deletions/last_modified |
+| `session_tools_recent` | 최근 사용한 tool name + 횟수 + 마지막 시각 (디버그 단서) |
+| `session_recaps`       | 세션이 자체적으로 적은 recap 텍스트 (사용자 표시용) |
+| `session_pending_queue`| 아직 처리하지 못한 follow-up 액션 큐 |
+
+각 테이블 PK 는 `session_uuid` 로 `hermes_sessions.uuid` 와 1:N 으로 묶인다.
+parity 컬럼 자체 (`kind`, `git_branch`, `msg_count`, `ai_title`, `summary`, …)
+는 PR #8 에서 둘로 쪼개졌다:
+
+* `hermes_agent_sessions` — hermes-only 세션 (`session_*.json` 출처).
+* `claude_session_parity` — native `~/.claude/projects/<uuid>.jsonl` 출처.
+
+`session_view` 가 spawned 행이면 `hermes_agent_sessions` 우선, native 행이면
+`claude_session_parity` 우선으로 조인하고, 둘 다 비어있으면 옛 스키마(통합
+테이블) 와 호환되도록 `hermes_agent_sessions` 를 claude UUID 로 한 번 더
+조회한다. 5종 자식 테이블은 source-agnostic 이라 그대로 공유된다.
+
+### 무엇이 사라졌나 — heartbeat in-memory synthesis
+
+PR #5 이전의 `worker_control_hermes.heartbeat` 는 ledger 가 알지 못하는
+jsonl 파일을 발견하면 **메모리 안에서만** `_synthetic=True` row 를 만들어
+slack DM 에 끼워 넣었다 (line 339–364). dashboard / build_report 는 그 row 를
+못 봤기 때문에 화면마다 세션 집합이 달랐다.
+
+PR #4 의 `session_sync` 가 동일한 데이터를 **실제 row 로 persist** 하면서
+PR #5 에서 그 in-memory 합성 블록은 **삭제**됐다. 이제 heartbeat 는
+`session_view.list_sessions()` 결과를 그대로 분류만 한다.
+
+### 트리거
+
+| 시점 | 무엇이 도는가 |
+|------|---------------|
+| 매 heartbeat 틱 (30분) | `workerctl-hermes-heartbeat` 가 `_sync_ledger_before_classify()` 로 `sync_all` 을 먼저 호출 → 그 다음 `classify_sessions()`. 평균 latency ≈ 720 ms (PR #6 측정치). |
+| (선택) `*/5 min` cron / Task Scheduler / systemd-timer | `workerctl session sync-all --quiet`. 30 분 freshness 가 부족한 경우만 추가. recipe 는 `docs/operations.md` "세션 레저 sync-all (Phase 2 PR #6)" 절. |
+| 디스패처 emit-time | `workerctl-hermes-projects session start` 가 `session_sync.upsert_session(from_dispatcher_argv)` 를 호출해 즉시 row 를 깐다. |
+
+레거시 `worker_sessions` 테이블은 Phase 2 에서 **deprecate** 되었다. 현 호스트
+기준 0 rows 이고 dashboard / report 어디에도 노출되지 않는다. 자세한 절차는
+`docs/operations.md` "Legacy `workerctl sessions list` (deprecated)" 참고.
+
 ## Future extensions (구현 안 함)
 
 - GitHub Issues 폴링 → 자동 워커 스폰 (cron 스폰 포함)

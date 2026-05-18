@@ -1,7 +1,18 @@
 # worker-control
 
+![Phase 2: SessionRepository unified](https://img.shields.io/badge/Phase%202-SessionRepository%20unified-success)
+
 로컬 Claude Code 워커 세션을 등록·실행·관찰하기 위한 최소 기능 도구.
 SQLite 만으로 동작하며 외부 의존성은 표준 라이브러리 + (선택) tmux 뿐이다.
+
+**Phase 2 (PR #4–#7) 흐름**: 디스크의 jsonl / profile session_*.json /
+디스패처 argv 를 **단일 writer** (`worker_control.session_sync`) 가
+`hermes_sessions` 로 upsert → **단일 reader** (`worker_control.session_view`)
+가 `hermes_runs` + `hermes_agent_sessions` + 5종 parity 자식 테이블을
+pre-join 해서 반환 → **3 consumer** (dashboard `http://127.0.0.1:8765/`,
+heartbeat 30분 Slack DM, build_report) 가 같은 뷰를 본다. heartbeat 의
+in-memory synthesis 는 PR #5 에서 삭제됐고, `sync-all` 은 heartbeat 가 매
+틱마다 자동 호출한다 (선택적 5분 cron 은 `docs/operations.md` 참고).
 
 > **워크스페이스 정책 (v0.2)**
 >
@@ -40,6 +51,20 @@ workerctl bootstrap
    (SOUL.md / cron 이 참조하는 경로 호환성 유지). default 프로파일은 skip.
 5. Windows 로그인 시 dashboard-daemon 자동 기동 (Startup 폴더 `.cmd`)
 6. 즉시 BFF 기동 → `http://127.0.0.1:8765/`
+
+bootstrap 이 끝나면 다음 한 줄로 단일 ledger 를 최신화한 뒤 대시보드를 띄울 수 있다:
+
+```bash
+# Phase 2: 단일 writer 가 jsonl/profile/디스패처 세 소스를 모두 upsert
+workerctl session sync-all
+# 대시보드는 같은 ledger 를 reader 로 본다
+workerctl dashboard            # → http://127.0.0.1:8765/
+```
+
+heartbeat 가 매 30 분 틱마다 `sync-all` 을 자동 호출하므로 일상 운영에서는
+별도 cron 이 필수 아니다. 5 분 freshness 가 필요하면 `docs/operations.md`
+"세션 레저 sync-all (Phase 2 PR #6)" 절의 Task Scheduler / cron /
+systemd-timer recipe 중 하나를 등록한다.
 
 ### 수동 셋업 (bootstrap 분해)
 
@@ -120,10 +145,12 @@ workerctl dashboard-snapshot
 탭 구성:
 
 - **워커 프로파일** — `worker_profiles` 테이블.
-- **Hermes 스폰 세션** — `worker_sessions` 테이블 (이 도구가 띄운 워커).
-- **Native Claude 세션** — `~/.claude/projects/` 의 JSONL 을 **읽기 전용** 으로
-  디스커버리한 결과 (세션 ID, 추정된 프로젝트 경로, `permissionMode`,
-  파일 크기/줄 수/수정 시각).
+- **Hermes 스폰 세션** — 단일 ledger `hermes_sessions` 중 `a-ok:` prefix 가
+  붙은 spawn 분류 (= 이 도구가 띄운 워커). parity 자식 테이블이 pre-join 되어
+  PR / 파일 / recap / pending 카드가 함께 그려진다.
+- **Native Claude 세션** — 같은 `hermes_sessions` 의 나머지 (native 분류).
+  `~/.claude/projects/` 디스커버리는 root 경로/메타만 공급하고 행 자체는
+  ledger 가 책임진다.
 - **관리 대상 프로젝트** — `projects` 테이블. 워크스페이스 역할(badge)·정책
   (`WRITE/PR` vs `READ-ONLY`)·git 상태·브랜치·경로를 한눈에.
 
