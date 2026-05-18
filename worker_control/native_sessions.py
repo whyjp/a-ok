@@ -111,7 +111,11 @@ def decode_project_dirname(name: str) -> str:
        prefix 와 일치하면 정확한 절대 경로를 복원한다. → 원본 하이픈을
        살릴 수 있다.
     2. 1단계 매칭이 안 되더라도 루트만 prefix 로 일치하면, 루트는 원본 그대로
-       두고 그 뒤만 ``-→/`` 로 치환 — 깊은 경로에서 정확하지 않을 수 있다.
+       두고 tail 은 단일 디렉토리명으로 보존 (하이픈 그대로). 인코딩이 lossy
+       이라 tail 내부의 ``-`` 가 원본의 ``/`` 였는지 ``-`` 였는지 단정할 수
+       없으므로, 임의로 쪼개는 대신 원본 이름을 그대로 살린다 (예: 루트가
+       리네임돼 자식 매칭이 깨졌을 때 ``worker-control`` 같은 이름이 망가지지
+       않도록).
     3. 알려진 루트 어디에도 안 걸리면 드라이브 prefix(``D--…``) 만 살리고
        나머지는 ``-→/`` 로 단순 치환.
     4. 그것도 아니면 ``-→/`` 로 단순 치환.
@@ -140,8 +144,9 @@ def decode_project_dirname(name: str) -> str:
                         f"{root_str}/{child_name}/"
                         f"{deeper.replace('-', '/')}"
                     )
-            # 2) 루트는 맞았지만 1단계 자식 매칭 실패 — best-effort
-            return f"{root_str}/{tail.replace('-', '/')}"
+            # 2) 루트는 맞았지만 1단계 자식 매칭 실패 — tail 을 단일 이름으로
+            # 보존 (하이픈을 임의로 ``/`` 로 쪼개지 않는다).
+            return f"{root_str}/{tail}"
 
     # 3) 드라이브 prefix 만 인식하는 단순 치환
     m = re.match(r"^([A-Za-z])--(.*)$", name)
