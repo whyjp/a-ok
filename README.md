@@ -113,6 +113,37 @@ workerctl dashboard-snapshot
 | `workerctl-hermes-report`    | Slack markdown + iShare HTML 번들 빌드 |
 | `workerctl-hermes-subprocs`  | claude-code 워크로드 자식 프로세스 디스커버리 |
 | `workerctl-hermes-migrate`   | 옛 `projects.db` → canonical DB 이관 (one-shot, idempotent) |
+| `aok-spawn`                  | PM dispatcher 헬퍼: `session start`/`run start --json` 의 `command` 를 PATH bootstrap + EXIT trap 보장 아래 실행. ledger `run end` 누락 차단용. |
+
+### `aok-spawn` — PM dispatcher 헬퍼
+
+PM 에이전트가 `workerctl-hermes-projects {session,run} start --print --prompt ... --json`
+이 돌려주는 `command` 를 그대로 임시 `.sh` 로 떨어뜨려 background bash 로 실행하면,
+fresh login bash 의 PATH 에 workerctl venv 가 없어 EXIT trap 의 `workerctl-hermes-projects
+run end ...` 가 `command not found` 로 silently fail 한다 → `hermes_runs.status='started'`
+가 영구히 박혀 대시보드 spawn 분류기에서 빠진다.
+
+`aok-spawn` 은 이 두 가지를 한 곳에 모은다:
+
+1. workerctl venv `Scripts/`(Windows) · `bin/`(POSIX) 디렉토리를 `PATH` 에 prepend (idempotent).
+2. 입력 cmd 가 이미 `( trap '...' EXIT; ... )` 로 감싸져 있는지 정규식으로 감지해서,
+   안 감싸진 경우만 동일한 trap body 로 wrap.
+
+권장 흐름:
+
+```bash
+# 1) dispatcher 가 run 1 행을 만들고 command 를 emit
+payload=$(workerctl-hermes-projects session start <project> --print \
+    --prompt "..." --max-turns 200 --json)
+run_id=$(echo "$payload" | jq -r .run_id)
+cmd=$(echo "$payload"   | jq -r .command)
+
+# 2) PM 은 임시 .sh 를 만들지 말고 aok-spawn 에 위임
+aok-spawn --run-id "$run_id" --inline-cmd "$cmd"            # foreground
+aok-spawn --run-id "$run_id" --inline-cmd "$cmd" --detach    # background
+```
+
+`--no-trap` 은 디버그용으로만 쓴다 (PM 이 직접 `run end` 를 부르겠다는 의미).
 
 `bootstrap` 이 hermes profile 의 `scripts/<name>.py` 위치에 wrapper 도
 함께 깔아주므로, 기존 SOUL.md / hermes cron 의 절대 경로
