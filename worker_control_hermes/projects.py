@@ -61,7 +61,12 @@ DB_PATH = Path(os.environ.get("WORKER_PROJECTS_DB", r"D:/work-github/.worker-con
 # unset. Reach for the function at every INSERT/UPDATE site — never read
 # os.environ['HERMES_SESSION_ID'] directly.
 _HERMES_SESSIONS_DIR = Path.home() / "AppData" / "Local" / "hermes" / "sessions"
-_HERMES_HSID_FRESH_SECONDS = 24 * 3600
+# Trust env only when its session_*.json mtime is within this many seconds
+# of the latest-mtime file in sessions_dir. A wall-clock "24h fresh" gate
+# was too generous: a 35-min-old env file would still beat a 30-s-old real
+# PM session, stamping the ghost id. Pegging the env to the latest mtime
+# instead means a stale env can never win against a live PM turn.
+_HERMES_HSID_GRACE_SECONDS = 60
 
 
 def _resolve_active_hsid(
@@ -72,8 +77,9 @@ def _resolve_active_hsid(
     """Return (hsid, reason) — the hermes_session_id this dispatch should stamp.
 
     Resolution order:
-      1. HERMES_SESSION_ID env matches an existing session_<id>.json that was
-         touched within the last 24 h → trust env (``env_validated_fresh``).
+      1. HERMES_SESSION_ID env points at an existing session_<id>.json whose
+         mtime is within ``_HERMES_HSID_GRACE_SECONDS`` of the latest-mtime
+         session file → trust env (``env_validated_latest``).
       2. Otherwise scan ``sessions_dir`` for ``session_*.json`` and pick the
          latest-mtime one (``fallback_latest_mtime`` if env was set,
          ``fallback_env_empty`` if it was not).
@@ -92,13 +98,6 @@ def _resolve_active_hsid(
     if not sdir.is_dir():
         return (env or None, "env_used_no_sessions_dir")
 
-    env_file = sdir / f"session_{env}.json" if env else None
-    if env_file is not None and env_file.is_file():
-        age = t_now - env_file.stat().st_mtime
-        if age < _HERMES_HSID_FRESH_SECONDS:
-            return (env, "env_validated_fresh")
-        # fall through — env points to a real but stale file
-
     candidates = sorted(
         sdir.glob("session_*.json"),
         key=lambda p: p.stat().st_mtime,
@@ -108,9 +107,18 @@ def _resolve_active_hsid(
         return (env or None, "no_session_files_fallback_env")
 
     latest = candidates[0]
+    latest_mtime = latest.stat().st_mtime
+
+    env_file = sdir / f"session_{env}.json" if env else None
+    if env_file is not None and env_file.is_file():
+        env_mtime = env_file.stat().st_mtime
+        if env_mtime >= latest_mtime - _HERMES_HSID_GRACE_SECONDS:
+            return (env, "env_validated_latest")
+        # fall through — env file exists but lags too far behind the latest PM turn
+
     hsid = latest.stem[len("session_"):]
     if env and hsid != env:
-        age_s = int(t_now - latest.stat().st_mtime)
+        age_s = int(t_now - latest_mtime)
         print(
             f"[workerctl] WARN: stale HERMES_SESSION_ID={env!r}; "
             f"using latest session {hsid!r} (mtime={age_s}s ago)",

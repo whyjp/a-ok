@@ -34,23 +34,26 @@ def _make_sessions_dir(tmp_path: Path, files: dict[str, float]) -> Path:
     return sdir
 
 
-def test_env_validated_when_file_fresh(tmp_path: Path) -> None:
+def test_env_validated_when_latest(tmp_path: Path) -> None:
+    """env file IS the latest-mtime session — trust it."""
     from worker_control_hermes.projects import _resolve_active_hsid
 
     sdir = _make_sessions_dir(tmp_path, {"abc123": 60})
     hsid, reason = _resolve_active_hsid(sessions_dir=sdir, env_value="abc123")
 
     assert hsid == "abc123"
-    assert reason == "env_validated_fresh"
+    assert reason == "env_validated_latest"
 
 
 def test_env_stale_falls_back_to_latest(tmp_path: Path, capsys) -> None:
+    """env file mtime lags the latest by far more than the 60-s grace
+    window → fall back to the latest-mtime session."""
     from worker_control_hermes.projects import _resolve_active_hsid
 
     sdir = _make_sessions_dir(
         tmp_path,
         {
-            "stale": 12 * 24 * 3600,   # 12 days old
+            "stale": 12 * 24 * 3600,   # 12 days old, well outside grace
             "fresh": 30,               # 30 s old → latest by mtime
         },
     )
@@ -62,6 +65,47 @@ def test_env_stale_falls_back_to_latest(tmp_path: Path, capsys) -> None:
     assert "stale HERMES_SESSION_ID" in err
     assert "'stale'" in err
     assert "'fresh'" in err
+
+
+def test_env_within_60s_grace_window_trusted(tmp_path: Path, capsys) -> None:
+    """env file is 30 s older than the latest — still inside the 60-s
+    grace window, so env is trusted (no WARN)."""
+    from worker_control_hermes.projects import _resolve_active_hsid
+
+    sdir = _make_sessions_dir(
+        tmp_path,
+        {
+            "envkid": 35,   # 35 s old
+            "newer":   5,   # 5 s old → 30 s newer than envkid
+        },
+    )
+    hsid, reason = _resolve_active_hsid(sessions_dir=sdir, env_value="envkid")
+
+    assert hsid == "envkid"
+    assert reason == "env_validated_latest"
+    assert "stale HERMES_SESSION_ID" not in capsys.readouterr().err
+
+
+def test_env_older_than_grace_falls_back(tmp_path: Path, capsys) -> None:
+    """env file is 5 min older than the latest — outside the 60-s grace
+    window, so fall back to latest and emit the WARN."""
+    from worker_control_hermes.projects import _resolve_active_hsid
+
+    sdir = _make_sessions_dir(
+        tmp_path,
+        {
+            "envold": 5 * 60 + 30,   # ~5 min 30 s old
+            "winner":           20,  # 20 s old → ~5 min newer
+        },
+    )
+    hsid, reason = _resolve_active_hsid(sessions_dir=sdir, env_value="envold")
+
+    assert hsid == "winner"
+    assert reason == "fallback_latest_mtime"
+    err = capsys.readouterr().err
+    assert "stale HERMES_SESSION_ID" in err
+    assert "'envold'" in err
+    assert "'winner'" in err
 
 
 def test_env_unset_uses_latest(tmp_path: Path, capsys) -> None:
