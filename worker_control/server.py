@@ -37,7 +37,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from worker_control import __version__
 from worker_control.dashboard import (
@@ -48,6 +48,8 @@ from worker_control.dashboard import (
 )
 from worker_control.hermes_session_sync import PeriodicSyncWorker, sync_once
 from worker_control.paths import db_path, runtime_root
+from worker_control.transcript import MAX_BYTES as TRANSCRIPT_MAX_BYTES
+from worker_control.transcript import load_transcript
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -58,6 +60,48 @@ DEFAULT_PORT = 8765
 
 def _json_bytes(obj: object) -> bytes:
     return json.dumps(obj, ensure_ascii=False).encode("utf-8")
+
+
+def _transcript_allow_roots() -> list[Path]:
+    """Allow-listed roots for ``/api/transcript`` path resolution.
+
+    Evaluated per request so test/runtime env overrides (e.g.
+    ``WORKER_CONTROL_TRANSCRIPT_EXTRA_ROOTS``) take effect without restart.
+    """
+    home = Path.home()
+    roots: list[Path] = [
+        home / ".claude" / "projects",
+        home / "AppData" / "Local" / "hermes" / "profiles",
+    ]
+    extra = os.environ.get("WORKER_CONTROL_TRANSCRIPT_EXTRA_ROOTS") or ""
+    # Split on os.pathsep (`;` on Windows, `:` on POSIX). Windows absolute
+    # paths embed `:` after the drive letter, so we never split on `:` there.
+    parts = extra.split(os.pathsep) if extra else []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            roots.append(Path(p).resolve())
+        except OSError:
+            continue
+    resolved: list[Path] = []
+    for r in roots:
+        try:
+            resolved.append(r.resolve())
+        except OSError:
+            continue
+    return resolved
+
+
+def _path_within_any(target: Path, roots: list[Path]) -> bool:
+    for r in roots:
+        try:
+            target.relative_to(r)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -108,13 +152,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     # --- 라우팅 -----------------------------------------------------------
     def do_GET(self) -> None:  # noqa: D401
-        path = urlsplit(self.path).path
+        parts = urlsplit(self.path)
+        path = parts.path
         if path in ("/", "/index.html", "/" + DEFAULT_OUTPUT_FILENAME):
             self._handle_dashboard()
         elif path == "/api/snapshot":
             self._handle_snapshot()
         elif path == "/api/health":
             self._handle_health()
+        elif path == "/api/transcript":
+            self._handle_transcript(parts.query)
         else:
             self._send_text(HTTPStatus.NOT_FOUND, f"not found: {path}\n")
 
@@ -163,6 +210,77 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "db_exists": db.exists(),
             "runtime_root": str(runtime_root()),
         })
+
+    def _handle_transcript(self, query: str) -> None:
+        params = parse_qs(query, keep_blank_values=False)
+        raw_paths = params.get("path") or []
+        if not raw_paths:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "missing_path",
+                 "detail": "query param 'path' is required"},
+            )
+            return
+        raw = raw_paths[0]
+        try:
+            target = Path(raw).resolve()
+        except OSError as exc:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "bad_path", "detail": str(exc)},
+            )
+            return
+        roots = _transcript_allow_roots()
+        if not _path_within_any(target, roots):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "path_not_allowed",
+                 "detail": f"{target} is outside the transcript allow-list"},
+            )
+            return
+        if not target.exists() or not target.is_file():
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": "not_found", "detail": str(target)},
+            )
+            return
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "stat_failed", "detail": str(exc)},
+            )
+            return
+        if size > TRANSCRIPT_MAX_BYTES:
+            self._send_json(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                {"error": "too_large",
+                 "detail": f"{size} bytes exceeds cap {TRANSCRIPT_MAX_BYTES}"},
+            )
+            return
+        try:
+            payload = load_transcript(target)
+        except ValueError as exc:
+            msg = str(exc)
+            if msg.startswith("too_large"):
+                self._send_json(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    {"error": "too_large", "detail": msg},
+                )
+                return
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "transcript_invalid", "detail": msg},
+            )
+            return
+        except Exception as exc:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "transcript_load_failed", "detail": str(exc)},
+            )
+            return
+        self._send_json(HTTPStatus.OK, payload)
 
 
 # ---------------------------------------------------------------------------
