@@ -78,12 +78,17 @@ CREATE TABLE IF NOT EXISTS hermes_sessions (
     claude_status_at TEXT,
     created_at      TEXT NOT NULL,
     last_used_at    TEXT NOT NULL,
-    ended_at        TEXT
+    ended_at        TEXT,
+    mention_id      TEXT GENERATED ALWAYS AS (
+        CASE origin WHEN 'spawned' THEN 'aok#' ELSE 'nat#' END
+        || substr(uuid, 1, 8)
+    ) VIRTUAL
 );
-CREATE INDEX IF NOT EXISTS ix_hermes_sessions_project   ON hermes_sessions(project_id);
-CREATE INDEX IF NOT EXISTS ix_hermes_sessions_status    ON hermes_sessions(status);
-CREATE INDEX IF NOT EXISTS ix_hermes_sessions_origin    ON hermes_sessions(origin);
-CREATE INDEX IF NOT EXISTS ix_hermes_sessions_last_used ON hermes_sessions(last_used_at DESC);
+CREATE INDEX IF NOT EXISTS ix_hermes_sessions_project    ON hermes_sessions(project_id);
+CREATE INDEX IF NOT EXISTS ix_hermes_sessions_status     ON hermes_sessions(status);
+CREATE INDEX IF NOT EXISTS ix_hermes_sessions_origin     ON hermes_sessions(origin);
+CREATE INDEX IF NOT EXISTS ix_hermes_sessions_last_used  ON hermes_sessions(last_used_at DESC);
+CREATE INDEX IF NOT EXISTS ix_hermes_sessions_mention_id ON hermes_sessions(mention_id);
 
 CREATE TABLE IF NOT EXISTS hermes_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,6 +133,23 @@ def _apply_extra_schema(db_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
         conn.executescript(_EXTRA_SCHEMA_SQL)
+        # Forward-only migration for DBs created before the GENERATED VIRTUAL
+        # mention_id column was added. SQLite permits adding a VIRTUAL
+        # generated column via ALTER TABLE (STORED would require a rebuild).
+        # Use table_xinfo (not table_info) — the latter omits GENERATED
+        # columns, so the check would always fire and re-ALTER would 1815.
+        cols = {r[1] for r in conn.execute("PRAGMA table_xinfo(hermes_sessions)")}
+        if "mention_id" not in cols:
+            conn.execute(
+                "ALTER TABLE hermes_sessions ADD COLUMN mention_id TEXT "
+                "GENERATED ALWAYS AS ("
+                "CASE origin WHEN 'spawned' THEN 'aok#' ELSE 'nat#' END "
+                "|| substr(uuid, 1, 8)) VIRTUAL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_hermes_sessions_mention_id "
+                "ON hermes_sessions(mention_id)"
+            )
         # The hermes_projects_v view + INSTEAD-OF triggers (backward-compat
         # for the legacy projects.db column shape). The SQL file is shipped
         # as package data inside worker_control_hermes/.
