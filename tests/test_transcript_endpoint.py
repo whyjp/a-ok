@@ -210,3 +210,23 @@ def test_oversize_file_returns_413(transcript_env):
             _get(srv.url + "api/transcript?path=" + _q(target))
     assert exc.value.code == 413
     assert _read_err(exc.value).get("error") == "too_large"
+
+
+def test_top_level_hermes_sessions_dir_is_allowed(monkeypatch, tmp_path):
+    """`~/AppData/Local/hermes/sessions/` (no `profiles/` subdir) must be in the
+    allow-list — that's where the active PM/orchestrator session transcripts
+    live, and the "Hermes 세션" panel often points the user at them. Regression
+    for the 400 ``path_not_allowed`` users hit on `session_<ts>_<hex>.json` at
+    that location."""
+    from worker_control.server import _transcript_allow_roots
+    # Point HOME at tmp_path so we can verify the resolver picks up the
+    # top-level sessions dir without depending on the test host's real HOME.
+    fake_home = tmp_path / "home"
+    sessions_dir = fake_home / "AppData" / "Local" / "hermes" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    monkeypatch.setenv("USERPROFILE", str(fake_home))   # Windows
+    monkeypatch.setenv("HOME", str(fake_home))          # POSIX
+    roots = _transcript_allow_roots()
+    assert sessions_dir.resolve() in roots, (
+        f"top-level hermes/sessions dir not in allow-list: {roots}"
+    )
