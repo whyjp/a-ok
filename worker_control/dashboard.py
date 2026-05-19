@@ -254,6 +254,49 @@ def _session_view_to_dict(v: SessionView) -> dict[str, Any]:
     }
 
 
+def _compute_chip_status(
+    *,
+    status: str | None,
+    ended_at: str | None,
+    last_used_at: str | None,
+    claude_status: str | None,
+) -> str:
+    """Spawn-claude chip color bucket — ``"active" | "inactive" | "done" | "error"``.
+
+    Mirrors ``session_view._compute_display_status`` precedence (ended/terminal
+    → done, recency thresholds → active/inactive/done) but adds an explicit
+    "error" bucket for ``status == 'failed'`` or ``claude_status == 'error'``.
+    Kept here (not in session_view) because the four-bucket variant is a
+    chip-rendering concern, not the ledger pill's three-bucket contract.
+    """
+    s = (status or "").lower()
+    cs = (claude_status or "").lower()
+    if ended_at:
+        return "done"
+    if s in ("done", "abandoned"):
+        return "done"
+    if s == "failed" or cs == "error":
+        return "error"
+    # Recency on last_used_at — same windows as session_view.
+    from worker_control.session_view import (
+        ACTIVE_WINDOW_SECONDS,
+        INACTIVE_WINDOW_SECONDS,
+        _parse_iso_dt,
+    )
+    last = _parse_iso_dt(last_used_at)
+    if last is None:
+        return "inactive"
+    now = datetime.now(timezone.utc)
+    age_s = (now - last).total_seconds()
+    if age_s < 0:
+        return "active"
+    if age_s <= ACTIVE_WINDOW_SECONDS:
+        return "active"
+    if age_s <= INACTIVE_WINDOW_SECONDS:
+        return "inactive"
+    return "done"
+
+
 def _collect_hermes_session_panel(
     ledger: list[SessionView],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -288,9 +331,15 @@ def _collect_hermes_session_panel(
     try:
         with connect_canonical() as conn:
             # Claude sessions per hermes session (via hermes_runs link).
+            # The extra status columns feed ``_compute_chip_status`` below so
+            # each spawn-claude chip can carry an active/inactive/done/error
+            # class — same precedence as session_view._compute_display_status,
+            # extended with an "error" bucket for failed runs.
             try:
                 cur = conn.execute(
                     "SELECT s.id AS sess_db_id, s.uuid, s.name, s.project_id, "
+                    "       s.status, s.ended_at, s.last_used_at, "
+                    "       s.claude_status, "
                     "       r.hermes_session_id "
                     "FROM hermes_runs r "
                     "JOIN hermes_sessions s ON s.id = r.session_id "
@@ -299,9 +348,15 @@ def _collect_hermes_session_panel(
                 )
                 for r in cur.fetchall():
                     rows_by_hsess.setdefault(r["hermes_session_id"], []).append({
-                        "claude_session_db_id": r["sess_db_id"],
-                        "claude_uuid":          r["uuid"],
-                        "claude_name":          r["name"],
+                        "claude_session_db_id":   r["sess_db_id"],
+                        "claude_uuid":            r["uuid"],
+                        "claude_name":            r["name"],
+                        "claude_status_compact":  _compute_chip_status(
+                            status=r["status"],
+                            ended_at=r["ended_at"],
+                            last_used_at=r["last_used_at"],
+                            claude_status=r["claude_status"],
+                        ),
                     })
             except Exception:
                 pass

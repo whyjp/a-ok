@@ -330,3 +330,149 @@ def test_render_html_replaces_inline_placeholder(populated_db):
     assert '"__INLINE_DATA__"' not in html_text
     # 같은 자산 기반이므로 동일한 한국어 라벨이 그대로 살아 있어야 한다
     assert "워커 프로파일" in html_text
+
+
+# --- spawn-claude chip status (claude_status_compact) ------------------------
+
+def test_compute_chip_status_ended_at_forces_done():
+    assert dashboard._compute_chip_status(
+        status="active", ended_at="2026-05-18T11:30:00+00:00",
+        last_used_at="2026-05-18T11:59:00+00:00", claude_status=None,
+    ) == "done"
+
+
+def test_compute_chip_status_terminal_status_forces_done():
+    for st in ("done", "abandoned"):
+        assert dashboard._compute_chip_status(
+            status=st, ended_at=None,
+            last_used_at="2026-05-18T11:59:00+00:00", claude_status=None,
+        ) == "done", f"status={st} should force done"
+
+
+def test_compute_chip_status_failed_or_claude_error_is_error():
+    # ledger status == "failed" → error
+    assert dashboard._compute_chip_status(
+        status="failed", ended_at=None,
+        last_used_at=None, claude_status=None,
+    ) == "error"
+    # claude_status == "error" → error (even with status="active")
+    assert dashboard._compute_chip_status(
+        status="active", ended_at=None,
+        last_used_at=None, claude_status="error",
+    ) == "error"
+
+
+def test_compute_chip_status_recency_buckets():
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    def _iso(minutes_ago: int) -> str:
+        return (now - _dt.timedelta(minutes=minutes_ago)).isoformat()
+
+    # ≤ 2h → active
+    assert dashboard._compute_chip_status(
+        status="active", ended_at=None, last_used_at=_iso(30),
+        claude_status=None,
+    ) == "active"
+    # 2h–24h → inactive
+    assert dashboard._compute_chip_status(
+        status="active", ended_at=None, last_used_at=_iso(60 * 5),
+        claude_status=None,
+    ) == "inactive"
+    # > 24h → done
+    assert dashboard._compute_chip_status(
+        status="active", ended_at=None, last_used_at=_iso(60 * 30),
+        claude_status=None,
+    ) == "done"
+
+
+def test_compute_chip_status_missing_last_used_falls_back_inactive():
+    assert dashboard._compute_chip_status(
+        status="active", ended_at=None, last_used_at=None, claude_status=None,
+    ) == "inactive"
+
+
+def test_hermes_session_panel_emits_chip_status_for_each_spawn(populated_db):
+    """Every ``spawned_claudes[*]`` row carries a valid ``claude_status_compact``.
+
+    Inserts four hermes_sessions rows linked to one hermes_agent_session via
+    hermes_runs, each in a distinct state (active/inactive/done/error). The
+    BFF panel must expose the bucket value on every chip — no key missing,
+    no value outside the four allowed buckets.
+    """
+    import datetime as _dt
+    import sqlite3
+
+    from worker_control import hermes_install
+    from worker_control_hermes.legacy_parity_schema import (
+        apply_legacy_parity_schema, upsert_session_row,
+    )
+
+    db_path = db.db_path()
+    hermes_install._apply_extra_schema(db_path)
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    fresh   = (now - _dt.timedelta(minutes=10)).isoformat()
+    stale   = (now - _dt.timedelta(hours=5)).isoformat()
+    ancient = (now - _dt.timedelta(hours=30)).isoformat()
+    hsid = "session_host_chip_status"
+
+    conn = sqlite3.connect(str(db_path))
+    apply_legacy_parity_schema(conn)
+    # An agent_sessions row so the panel surfaces this hsid at all.
+    upsert_session_row(conn, {
+        "hermes_session_id": hsid,
+        "kind": "hermes",
+        "profile_name": "worker",
+        "profile_path": "/fake/profile",
+        "transcript_path": f"/fake/profile/sessions/{hsid}.json",
+        "synced_at": now.isoformat(),
+    })
+    # Project for the FK constraint on hermes_sessions.
+    conn.execute(
+        "INSERT INTO projects(name, path, root_role, created_at, updated_at) "
+        "VALUES ('p', '/tmp/p', 'owned_work', ?, ?)", (fresh, fresh),
+    )
+    proj_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    # Four claude sessions in distinct states.
+    spec = [
+        # (uuid, status, ended_at, last_used_at, claude_status, expected)
+        ("11111111-aaaa-aaaa-aaaa-111111111111",
+         "active", None, fresh,   None,    "active"),
+        ("22222222-aaaa-aaaa-aaaa-222222222222",
+         "active", None, stale,   None,    "inactive"),
+        ("33333333-aaaa-aaaa-aaaa-333333333333",
+         "done",   ancient, ancient, None, "done"),
+        ("44444444-aaaa-aaaa-aaaa-444444444444",
+         "failed", None, fresh,   None,    "error"),
+    ]
+    for i, (uuid, st, ended, last_used, cstat, _expected) in enumerate(spec):
+        conn.execute(
+            "INSERT INTO hermes_sessions(uuid, project_id, name, status, origin, "
+            " created_at, last_used_at, ended_at, claude_status) "
+            "VALUES (?, ?, ?, ?, 'spawned', ?, ?, ?, ?)",
+            (uuid, proj_id, f"a-ok:chip-{i}", st, last_used, last_used, ended, cstat),
+        )
+        sid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            "INSERT INTO hermes_runs(session_id, run_index, name, mode, "
+            "command, started_at, hermes_session_id) "
+            "VALUES (?, 1, ?, 'print', '', ?, ?)",
+            (sid, f"a-ok:chip-{i}-r", last_used, hsid),
+        )
+    conn.commit()
+    conn.close()
+
+    rows, _ = dashboard._collect_hermes_session_panel([])
+    panel_row = next(r for r in rows if r["hermes_session_id"] == hsid)
+    by_uuid = {c["claude_uuid"]: c for c in panel_row["spawned_claudes"]}
+    valid = {"active", "inactive", "done", "error"}
+    for uuid, _st, _ended, _last, _cstat, expected in spec:
+        chip = by_uuid[uuid]
+        assert "claude_status_compact" in chip, f"missing on {uuid}"
+        assert chip["claude_status_compact"] in valid
+        assert chip["claude_status_compact"] == expected, (
+            f"uuid={uuid} expected={expected} "
+            f"got={chip['claude_status_compact']}"
+        )
