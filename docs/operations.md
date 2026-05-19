@@ -479,6 +479,38 @@ sessions list` (deprecated)" for the migration table.
 - `worker_sessions` 행이 의미 있는 cardinality 로 쌓이고, dashboard 의
   Hermes 탭과 별도의 패널이 필요하다는 사용자 요구가 명시.
 
+## spawn-backfill — 누락된 a-ok run 자동 보정
+
+`workerctl-hermes-heartbeat` 의 매 tick (`classify_sessions`) 이 끝나기
+직전, `worker_control_hermes.spawn_backfill.backfill_all()` 이 호출되어
+다음 두 ledger 누락 케이스를 정리한다:
+
+1. **Stuck started** — `hermes_runs.status='started'` 인데 트랜스크립트에
+   `exit=<n>` 마커가 보이거나, `transcript_mtime` 가 60 분 이상 지난 경우
+   `status` 를 `done`/`failed` 로 close 하고 `ended_at`,
+   `note='backfill: …'` 를 채운다.
+2. **Missing row** — 트랜스크립트에 `a-ok:<slug>` + `aok-spawn` /
+   `claude -p` 같은 스폰 시그니처는 있지만 해당 슬러그의 `hermes_runs`
+   행이 없는 경우, 새 행을 `mode='print'`, `status` 는 exit 마커 기반으로
+   추론, `note='backfill: synthesized …'` 로 INSERT.
+
+대상은 `hermes_agent_sessions.profile_name IS NOT NULL` 이고
+`transcript_mtime` 가 최근 `window_hours` (default 168h) 이내인 행만.
+`hermes_sessions` / `hermes_agent_sessions` 는 절대 변경하지 않는다.
+
+CLI 도 함께 추가됐다:
+
+```bash
+# 안전한 dry-run — 무엇이 바뀔지만 출력
+workerctl-hermes-backfill --window-hours 168 --dry-run --json
+
+# 직접 적용 (heartbeat cron 이 알아서 도는 게 정상이지만 ad-hoc 보강용)
+workerctl-hermes-backfill --window-hours 168
+```
+
+heartbeat 통합 실패는 stderr 에 `[spawn-backfill] failed: …` 한 줄을
+남기고 흐름을 깨지 않는다.
+
 ## 미래 확장 (계획만)
 
 - GitHub Issues / Linear 폴링 → 새 워커 자동 스폰
