@@ -362,22 +362,35 @@ def classify_sessions(window_min: int) -> dict:
     # Independent of the parity ingest above (different tables, different
     # failure modes); errors are swallowed so a bad transcript can't
     # break the heartbeat tick.
-    try:
-        from worker_control_hermes.spawn_backfill import backfill_all as _spawn_backfill
-        _conn = sqlite3.connect(DB_PATH)
-        _conn.row_factory = sqlite3.Row
-        _bf_stats = _spawn_backfill(_conn, window_hours=168, dry_run=False)
-        _conn.close()
-        # Trim the noisy per-session breakdown out of the heartbeat log
-        # — leave just the headline counters.
-        _bf_brief = {
-            k: _bf_stats.get(k, 0) for k in
-            ("sessions_scanned", "sessions_with_changes",
-             "updated", "inserted", "relinked", "ambiguous", "skipped")
-        }
-        print(f"[spawn-backfill] {_bf_brief}", file=sys.stderr)
-    except Exception as e:
-        print(f"[spawn-backfill] failed: {e!r}", file=sys.stderr)
+    #
+    # DISABLED BY DEFAULT after the PR #17 dry-run revealed slug-based owner
+    # inference can misattribute orphan runs to the wrong PM session (a
+    # brief that quotes another session's slug is enough). The dispatch-time
+    # HERMES_SESSION_ID validator in projects.py is the real fix; this
+    # backfill stays as opt-in salvage for legacy gaps. Code is preserved —
+    # only the call site is gated.
+    if os.environ.get("WORKER_CONTROL_BACKFILL_ENABLED", "").lower() in ("1", "true", "yes", "on"):
+        try:
+            from worker_control_hermes.spawn_backfill import backfill_all as _spawn_backfill
+            _conn = sqlite3.connect(DB_PATH)
+            _conn.row_factory = sqlite3.Row
+            _bf_stats = _spawn_backfill(_conn, window_hours=168, dry_run=False)
+            _conn.close()
+            # Trim the noisy per-session breakdown out of the heartbeat log
+            # — leave just the headline counters.
+            _bf_brief = {
+                k: _bf_stats.get(k, 0) for k in
+                ("sessions_scanned", "sessions_with_changes",
+                 "updated", "inserted", "relinked", "ambiguous", "skipped")
+            }
+            print(f"[spawn-backfill] {_bf_brief}", file=sys.stderr)
+        except Exception as e:
+            print(f"[spawn-backfill] failed: {e!r}", file=sys.stderr)
+    else:
+        print(
+            "[spawn-backfill] disabled (set WORKER_CONTROL_BACKFILL_ENABLED=1 to enable)",
+            file=sys.stderr,
+        )
 
     sessions = _load_db_sessions()
     jsonl = _jsonl_lookup()
