@@ -34,7 +34,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from worker_control.db import connect
 
@@ -156,6 +156,11 @@ class SessionView:
     #   done     = ended explicitly, or status indicates terminal, or ≥ 24h
     # Precedence: ended_at / terminal status > effective_status > recency.
     display_status: str = "inactive"
+
+    # Sibling UUIDs collapsed into this row by ``list_sessions(group_dupes=…)``.
+    # Empty under ``group_dupes="off"``; populated when the SELECT-axis dedup
+    # policy folds same-name rows into a single visible card.
+    superseded_by: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -561,12 +566,54 @@ def _load_child_arrays(conn: sqlite3.Connection) -> dict[str, dict[str, list]]:
 # ---------------------------------------------------------------------------
 
 
+DedupPolicy = Literal["off", "by_name", "by_name_within_hsid"]
+
+
+def _dedup_views(
+    views: list[SessionView],
+    *,
+    policy: DedupPolicy,
+    parent_hsid: dict[str, str],
+) -> list[SessionView]:
+    """Collapse same-name rows per the SELECT-axis dedup policy.
+
+    Input is already ordered newest-first by ``last_used_at``, so the first
+    occurrence per group key is the winner; later occurrences are recorded
+    on the winner's ``superseded_by`` list (newest superseded first) and
+    dropped from the returned list.
+
+    ``policy="by_name_within_hsid"`` keys by ``(name, parent_hsid)``. A row
+    with no parent hsid (native row) keys by ``(name, uuid)`` so distinct
+    native rows of the same name never collapse — the policy exists to fix
+    the spawn-side duplicate-card artifact, not to merge native sessions.
+    """
+    if policy == "off" or not views:
+        return views
+    grouped: dict[tuple[str, str], SessionView] = {}
+    order: list[tuple[str, str]] = []
+    for v in views:
+        if policy == "by_name":
+            key = (v.name or "", "*")
+        else:  # by_name_within_hsid
+            hsid = parent_hsid.get((v.uuid or "").lower(), "")
+            # Fall back to uuid when no parent hsid — keeps native rows distinct.
+            key = (v.name or "", hsid or f"__noparent__:{v.uuid}")
+        winner = grouped.get(key)
+        if winner is None:
+            grouped[key] = v
+            order.append(key)
+        else:
+            winner.superseded_by.append(v.uuid)
+    return [grouped[k] for k in order]
+
+
 def list_sessions(
     *,
     classification: str | Iterable[str] | None = None,
     freshness: str | None = None,
     since: str | None = None,
     limit: int | None = None,
+    group_dupes: DedupPolicy = "by_name_within_hsid",
 ) -> list[SessionView]:
     """Return one ``SessionView`` per ``hermes_sessions`` row.
 
@@ -736,8 +783,12 @@ def list_sessions(
                 last_used_at=r["last_used_at"],
             ),
         ))
-        if limit is not None and len(out) >= limit:
-            break
+
+    # SELECT-axis dedup runs before `limit` so the cap counts visible rows,
+    # not pre-collapse duplicates.
+    out = _dedup_views(out, policy=group_dupes, parent_hsid=parent_hsid)
+    if limit is not None and len(out) > limit:
+        out = out[:limit]
     return out
 
 
