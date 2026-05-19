@@ -140,6 +140,40 @@ workerctl sessions stop <session-id-or-name>
 - **콘솔 모드**: 저장된 PID 로 `taskkill /PID <pid> /T /F` (Windows) 또는
   `kill -TERM <pid>` (POSIX).
 
+### Hermes PM dispatcher 흐름 (권장)
+
+`workerctl-hermes-projects {session,run} start --json` 은 `command` 필드에
+이미 trap-wrapped bash 명령 한 줄을 돌려준다. PM 에이전트가 이 명령을 임시
+`cmd-*.sh` 로 직접 떨어뜨려 background bash 로 실행하면, 그 자식 bash 의
+PATH 에 workerctl venv 가 없어 EXIT trap 의 `workerctl-hermes-projects run end`
+가 silently fail 하고 `hermes_runs.status` 가 `started` 로 영구히 박힌다
+(=대시보드 spawn 카운팅 누락).
+
+신규/체인 워커 스폰은 모두 **`aok-spawn` CLI 에 위임**한다:
+
+```bash
+payload=$(workerctl-hermes-projects session start <project> --print \
+    --prompt "..." --max-turns 200 --json)
+aok-spawn \
+    --run-id   "$(echo "$payload" | jq -r .run_id)" \
+    --inline-cmd "$(echo "$payload" | jq -r .command)"
+```
+
+`aok-spawn` 가 (1) workerctl venv `Scripts/`(Windows) · `bin/`(POSIX) 을
+PATH 에 prepend 하고, (2) 입력 cmd 가 이미 `( trap '...' EXIT; ...)` 로
+감싸졌는지 정규식 검사한 뒤 빠졌으면 wrap 한다. 둘 다 idempotent — dispatcher
+가 이미 wrap 한 명령을 그대로 받아도 trap 이 이중으로 박히지 않는다.
+
+옵션:
+
+| 플래그 | 의미 |
+|--------|------|
+| `--foreground` (기본) | bash 자식이 끝날 때까지 같이 살아있고 exit code 전파 |
+| `--detach`            | nohup-style 백그라운드 실행. PID 만 stdout 으로 출력 후 즉시 종료 |
+| `--log <path>`        | 로그 경로 (기본 `$TEMP/aok-spawn-run-<run_id>.log`) |
+| `--no-trap`           | 디버그용. PM 이 직접 `run end` 부를 때만 사용 |
+| `--json`              | 단일 줄 JSON 요약 (`run_id`, `log`, `pid`, `exit_code`, `trap_already_present`, `path_prepended`, `detached`) |
+
 ## 대시보드 (SQLite BFF + 동적 FE)
 
 전체 상태를 한 페이지로 보고 싶다면 — **기본 운영은 SQLite 기반 BFF + 동적 FE**

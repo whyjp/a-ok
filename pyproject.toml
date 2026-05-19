@@ -33,6 +33,7 @@ workerctl-hermes-subprocs   = "worker_control_hermes.subprocs:main"
 workerctl-hermes-migrate    = "worker_control_hermes.migrate_to_canonical_db:main"
 workerctl-hermes-report-legacy = "worker_control_hermes.legacy_parity_report:main"
 workerctl-hermes-parity-ingest = "worker_control_hermes.legacy_parity_cli:ingest_cmd"
+aok-spawn                   = "worker_control_hermes.aok_spawn:main"
 
 [tool.setuptools]
 packages = ["worker_control", "worker_control_hermes"]
