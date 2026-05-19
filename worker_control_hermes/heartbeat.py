@@ -357,6 +357,28 @@ def classify_sessions(window_min: int) -> dict:
     except Exception as e:
         print(f"[parity-ingest] failed: {e!r}", file=sys.stderr)
 
+    # Ledger gap backfill — scan transcripts for spawn signatures and
+    # close/synthesize ``hermes_runs`` rows the dispatcher trap missed.
+    # Independent of the parity ingest above (different tables, different
+    # failure modes); errors are swallowed so a bad transcript can't
+    # break the heartbeat tick.
+    try:
+        from worker_control_hermes.spawn_backfill import backfill_all as _spawn_backfill
+        _conn = sqlite3.connect(DB_PATH)
+        _conn.row_factory = sqlite3.Row
+        _bf_stats = _spawn_backfill(_conn, window_hours=168, dry_run=False)
+        _conn.close()
+        # Trim the noisy per-session breakdown out of the heartbeat log
+        # — leave just the headline counters.
+        _bf_brief = {
+            k: _bf_stats[k] for k in
+            ("sessions_scanned", "sessions_with_changes",
+             "updated", "inserted", "skipped")
+        }
+        print(f"[spawn-backfill] {_bf_brief}", file=sys.stderr)
+    except Exception as e:
+        print(f"[spawn-backfill] failed: {e!r}", file=sys.stderr)
+
     sessions = _load_db_sessions()
     jsonl = _jsonl_lookup()
     db_uuids = {s["uuid"].lower() for s in sessions}
