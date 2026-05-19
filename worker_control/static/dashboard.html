@@ -533,6 +533,18 @@ body.stats-collapsed .roots { display: none; }
 .tag.spawned { background: rgba(167,139,250,.18); color: #c4b5fd; border: 1px solid rgba(167,139,250,.35); }
 .tag.hermes  { background: rgba(124,242,195,.18); color: #6ee7b7; border: 1px solid rgba(124,242,195,.35); }
 
+/* Spawn-chip status coloring — the chip inside the hermes-session panel's
+   "spawned claude" column. The four buckets come from BFF's
+   ``_compute_chip_status`` (active/inactive/done/error). A leading glyph
+   gives a colorblind-safe secondary signal alongside the background. */
+.spawn-chip .badge.s-active   { background: rgba(124,242,195,.18); color: var(--accent); }
+.spawn-chip .badge.s-inactive { background: rgba(244,200,103,.18); color: var(--warn); }
+.spawn-chip .badge.s-done     { background: rgba(126,182,255,.13); color: var(--info); }
+.spawn-chip .badge.s-error    { background: rgba(255,118,118,.18); color: var(--danger, #ff7676); }
+.spawn-chip .badge::before { content: "● "; opacity: .85; }
+.spawn-chip .badge.s-done::before { content: "○ "; }
+.spawn-chip .badge.s-error::before { content: "✕ "; }
+
 /* Status pill — display_status (active/inactive/done) painted at the top
    of every session card. Colors mirror the legacy report so the eye
    already trusts them. The "row-flash" class is briefly toggled by the
@@ -874,6 +886,7 @@ body.tr-lock { overflow: hidden; }
           spawn 을 묶어 보여준다. FE 는 더 이상 디스크를 읽지 않으며 DB 가
           유일한 출처다 — <code>workerctl sessions sync-hermes</code> 또는
           BFF 의 60s 주기 워커가 동기화한다.
+          <small class="path">chip 색상: ● active ● inactive ○ done ✕ error</small>
         </div>
       </div>
       <div class="panel-tools">
@@ -1874,11 +1887,15 @@ body.tr-lock { overflow: hidden; }
       const chips = (r.spawned_claudes || []).map(function(c) {
         const uuid8 = (c.claude_uuid || "").slice(0, 8);
         const label = (c.claude_name || uuid8 || "—");
+        const rawStatus = (c.claude_status_compact || "inactive").toLowerCase();
+        const status = (rawStatus === "active" || rawStatus === "inactive"
+                        || rawStatus === "done"   || rawStatus === "error")
+                       ? rawStatus : "inactive";
         return "<a href='#' class='spawn-chip' "
              + "data-spawn-uuid='" + escapeHtml(c.claude_uuid || "") + "' "
              + "data-spawn-id='" + escapeHtml(String(c.claude_session_db_id || "")) + "' "
-             + "title='" + escapeHtml(c.claude_uuid || "") + "'>"
-             + "<span class='badge accent plain'>"
+             + "title='" + escapeHtml((c.claude_uuid || "") + "\nstatus: " + status) + "'>"
+             + "<span class='badge plain s-" + status + "'>"
              + escapeHtml(label.slice(0, 28))
              + "</span></a>";
       }).join(" ");
