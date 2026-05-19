@@ -72,6 +72,11 @@ def _transcript_allow_roots() -> list[Path]:
     roots: list[Path] = [
         home / ".claude" / "projects",
         home / "AppData" / "Local" / "hermes" / "profiles",
+        # Top-level Hermes sessions dir (PM/orchestrator agent transcripts —
+        # `session_<ts>_<hex>.json` written by the active Hermes session, not
+        # under a named profile subdir). Without this the dashboard's
+        # "Hermes 세션" rows pointing at this path get 400 path_not_allowed.
+        home / "AppData" / "Local" / "hermes" / "sessions",
     ]
     extra = os.environ.get("WORKER_CONTROL_TRANSCRIPT_EXTRA_ROOTS") or ""
     # Split on os.pathsep (`;` on Windows, `:` on POSIX). Windows absolute

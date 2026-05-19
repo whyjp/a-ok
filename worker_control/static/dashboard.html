@@ -949,6 +949,7 @@ body.tr-lock { overflow: hidden; }
             <th class="sortable col-name" data-sort-key="name">이름</th>
             <th class="col-disp">마지막 dispatch</th>
             <th class="sortable col-runs" data-sort-key="run_count">runs (-p / total)</th>
+            <th class="sortable col-turns" data-sort-key="turn_count">turns</th>
             <th class="sortable col-status" data-sort-key="display_status">상태</th>
             <th class="sortable col-proj" data-sort-key="project_name">프로젝트</th>
             <th class="col-uuid">UUID</th>
@@ -1000,6 +1001,7 @@ body.tr-lock { overflow: hidden; }
             <th class="col-class">분류</th>
             <th class="col-disp">마지막 dispatch</th>
             <th class="sortable col-runs" data-sort-key="run_count">runs (-p / total)</th>
+            <th class="sortable col-turns" data-sort-key="turn_count">turns</th>
             <th class="sortable col-status" data-sort-key="display_status">상태</th>
             <th class="sortable col-proj" data-sort-key="project_name">프로젝트</th>
             <th class="col-uuid">UUID</th>
@@ -1606,6 +1608,9 @@ body.tr-lock { overflow: hidden; }
     const lastRunTime = s.last_run_started_at || s.last_used_at || "—";
     const runCounts = "<strong>" + (s.print_run_count || 0) + "</strong>"
       + " / " + (s.run_count || 0);
+    const turnsCell = (s.turn_count !== null && s.turn_count !== undefined)
+      ? "<span class='mono'>" + s.turn_count + "</span>"
+      : "—";
     const claudeName = (s.claude_name && s.claude_name !== s.name)
       ? "<div class='path'>claude /name: " + escapeHtml(s.claude_name) + "</div>"
       : "";
@@ -1647,6 +1652,7 @@ body.tr-lock { overflow: hidden; }
       +     "<div class='path'>" + escapeHtml(lastRunTime) + "</div>"
       +     lastRun + "</td>"
       +   "<td class='mono col-runs'>" + runCounts + "</td>"
+      +   "<td class='col-turns'>" + turnsCell + "</td>"
       +   "<td class='col-status'>" + ledgerStatusPill(s) + "</td>"
       +   "<td class='col-proj'>"
       +     "<div title='" + escapeHtml(s.project_name || "") + "'>"
@@ -1756,7 +1762,7 @@ body.tr-lock { overflow: hidden; }
         ? "scv- prefix 가 붙은 세션이 없습니다. "
           + "scripts/projects.py 의 _run_name() 이 새 dispatch 부터 prefix 를 붙입니다."
         : "필터에 일치하는 세션이 없습니다.";
-      tbody.innerHTML = emptyRow(8, msg);
+      tbody.innerHTML = emptyRow(9, msg);
       renderPager({ total: 0 }, "hermes");
       return;
     }
@@ -1792,7 +1798,7 @@ body.tr-lock { overflow: hidden; }
     });
     const tbody = document.getElementById("t-native");
     if (!rowsAll.length) {
-      tbody.innerHTML = emptyRow(9,
+      tbody.innerHTML = emptyRow(10,
         "scv- prefix 가 없는 세션이 없습니다. "
         + "(scripts/projects.py session sync-native --auto-register-projects 로 임포트 가능)");
       renderPager({ total: 0 }, "native");
