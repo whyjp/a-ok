@@ -38,6 +38,7 @@ import shlex
 import sqlite3
 import subprocess
 import sys
+import time
 import uuid as _uuid
 from pathlib import Path
 
@@ -51,11 +52,79 @@ from worker_control.session_sync import (
 
 DB_PATH = Path(os.environ.get("WORKER_PROJECTS_DB", r"D:/work-github/.worker-control/worker-control.sqlite3"))
 
-# hermes-agent stamps this on every tool-call child process; we keep it on
-# every hermes_runs insert so the dashboard can show "this claude session
-# was spawned from hermes turn X" and offer a click-through to that turn.
-# Empty (None) when invoked from a regular shell.
-_HERMES_SESSION_ID = os.environ.get("HERMES_SESSION_ID") or None
+# hermes-agent stamps HERMES_SESSION_ID on every tool-call child process so
+# we can record "this claude session was spawned from hermes turn X" on each
+# hermes_runs row. The env value is not trusted blindly though: stale ghost
+# IDs leak from cached terminal tool wrappers, so _resolve_active_hsid below
+# validates env against the actual ~/AppData/Local/hermes/sessions/ contents
+# and falls back to the latest-mtime session file when env is stale or
+# unset. Reach for the function at every INSERT/UPDATE site — never read
+# os.environ['HERMES_SESSION_ID'] directly.
+_HERMES_SESSIONS_DIR = Path.home() / "AppData" / "Local" / "hermes" / "sessions"
+_HERMES_HSID_FRESH_SECONDS = 24 * 3600
+
+
+def _resolve_active_hsid(
+    sessions_dir: Path | None = None,
+    env_value: str | None = None,
+    now: float | None = None,
+) -> tuple[str | None, str]:
+    """Return (hsid, reason) — the hermes_session_id this dispatch should stamp.
+
+    Resolution order:
+      1. HERMES_SESSION_ID env matches an existing session_<id>.json that was
+         touched within the last 24 h → trust env (``env_validated_fresh``).
+      2. Otherwise scan ``sessions_dir`` for ``session_*.json`` and pick the
+         latest-mtime one (``fallback_latest_mtime`` if env was set,
+         ``fallback_env_empty`` if it was not).
+      3. If sessions_dir doesn't exist at all, return env unchanged
+         (``env_used_no_sessions_dir``) — we have no better signal.
+      4. If sessions_dir exists but is empty, return env unchanged
+         (``no_session_files_fallback_env``).
+
+    Parameters are injectable for testing — production callers pass nothing.
+    """
+    env = (env_value if env_value is not None
+           else os.environ.get("HERMES_SESSION_ID") or "")
+    sdir = sessions_dir if sessions_dir is not None else _HERMES_SESSIONS_DIR
+    t_now = now if now is not None else time.time()
+
+    if not sdir.is_dir():
+        return (env or None, "env_used_no_sessions_dir")
+
+    env_file = sdir / f"session_{env}.json" if env else None
+    if env_file is not None and env_file.is_file():
+        age = t_now - env_file.stat().st_mtime
+        if age < _HERMES_HSID_FRESH_SECONDS:
+            return (env, "env_validated_fresh")
+        # fall through — env points to a real but stale file
+
+    candidates = sorted(
+        sdir.glob("session_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return (env or None, "no_session_files_fallback_env")
+
+    latest = candidates[0]
+    hsid = latest.stem[len("session_"):]
+    if env and hsid != env:
+        age_s = int(t_now - latest.stat().st_mtime)
+        print(
+            f"[workerctl] WARN: stale HERMES_SESSION_ID={env!r}; "
+            f"using latest session {hsid!r} (mtime={age_s}s ago)",
+            file=sys.stderr,
+        )
+    reason = "fallback_latest_mtime" if env else "fallback_env_empty"
+    return (hsid, reason)
+
+
+def _stamp_hsid() -> str | None:
+    """Resolve the active hsid and emit a one-line diagnostic to stderr."""
+    hsid, reason = _resolve_active_hsid()
+    print(f"[workerctl] hsid={hsid} ({reason})", file=sys.stderr)
+    return hsid
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS hermes_projects_v (
@@ -466,7 +535,7 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         conn.execute(
             "INSERT INTO hermes_runs(session_id, run_index, name, mode, command, status, started_at, hermes_session_id) "
             "VALUES (?, ?, ?, ?, ?, 'started', ?, ?)",
-            (sess_id, 1, run_name, mode, raw_cmd, now, _HERMES_SESSION_ID),
+            (sess_id, 1, run_name, mode, raw_cmd, now, _stamp_hsid()),
         )
         run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         # Wrap the emitted command so it auto-calls `run end` on exit.
@@ -985,7 +1054,7 @@ def cmd_run_start(args: argparse.Namespace) -> None:
         conn.execute(
             "INSERT INTO hermes_runs(session_id, run_index, name, mode, command, status, started_at, hermes_session_id) "
             "VALUES (?, ?, ?, ?, ?, 'started', ?, ?)",
-            (sess["id"], idx, run_name, mode, raw_cmd, now, _HERMES_SESSION_ID),
+            (sess["id"], idx, run_name, mode, raw_cmd, now, _stamp_hsid()),
         )
         run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         auto_close = not getattr(args, "no_auto_close", False)

@@ -465,9 +465,12 @@ def test_backfill_all_aggregates_per_session(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_classify_sessions_calls_backfill(monkeypatch, tmp_path: Path) -> None:
-    """classify_sessions() must invoke backfill_all once per tick, and a
-    failure in backfill must not break the heartbeat flow."""
+    """classify_sessions() must invoke backfill_all once per tick when the
+    env gate is on, and a failure in backfill must not break the heartbeat
+    flow. The gate itself defaults OFF — see ``test_dispatch_hsid``."""
     from worker_control_hermes import heartbeat
+
+    monkeypatch.setenv("WORKER_CONTROL_BACKFILL_ENABLED", "1")
 
     db = tmp_path / "wc.sqlite3"
     conn = sqlite3.connect(db)
