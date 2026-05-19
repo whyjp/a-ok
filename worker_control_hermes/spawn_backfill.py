@@ -105,6 +105,65 @@ def scan_transcript_for_spawns(path: str) -> list[dict]:
     return list(seen.values())
 
 
+def _is_ghost_hsid(conn: sqlite3.Connection, hsid: str) -> bool:
+    """Return True when ``hsid`` looks like a stale/empty Hermes agent session.
+
+    Detection:
+    - No ``hermes_agent_sessions`` row at all → ghost (orphan id leaked
+      out of stale env propagation).
+    - Row exists but every activity signal is empty/zero:
+      ``ai_title`` NULL/blank, ``first_user_text`` NULL/blank,
+      ``turn_count <= 1``, ``msg_user == 0`` → ghost (the session was
+      registered but never carried real conversation).
+    - Row exists and the schema predates these activity columns → treat
+      as real (we can't prove it's a ghost).
+    """
+    row = conn.execute(
+        "SELECT * FROM hermes_agent_sessions WHERE hermes_session_id = ?",
+        (hsid,),
+    ).fetchone()
+    if row is None:
+        return True
+    try:
+        keys = set(row.keys())
+    except AttributeError:
+        return False
+    required = {"ai_title", "first_user_text", "turn_count", "msg_user"}
+    if not required.issubset(keys):
+        return False
+
+    def _empty(v: Any) -> bool:
+        return v is None or (isinstance(v, str) and not v.strip())
+
+    return (
+        _empty(row["ai_title"])
+        and _empty(row["first_user_text"])
+        and (row["turn_count"] or 0) <= 1
+        and (row["msg_user"] or 0) == 0
+    )
+
+
+def _find_run_on_other_hsid(
+    conn: sqlite3.Connection, slug: str, current_hsid: str
+) -> sqlite3.Row | None:
+    """Look up an a-ok run with this slug stamped on a *different* hsid.
+
+    Returns the most-recent matching row (by ``run_index``), or ``None``.
+    Used for the ghost→real relink path.
+    """
+    return conn.execute(
+        "SELECT id, session_id, run_index, name, status, started_at, "
+        "       ended_at, note, hermes_session_id "
+        "FROM hermes_runs "
+        "WHERE name LIKE 'a-ok:%' "
+        "  AND hermes_session_id IS NOT NULL "
+        "  AND hermes_session_id != ? "
+        "  AND (name = ? OR name LIKE ?) "
+        "ORDER BY run_index DESC LIMIT 1",
+        (current_hsid, slug, slug + "-r%"),
+    ).fetchone()
+
+
 def _fetch_runs_for_session(
     conn: sqlite3.Connection, hermes_session_id: str
 ) -> list[sqlite3.Row]:
@@ -166,6 +225,8 @@ def backfill_session(
         "updated": 0,
         "inserted": 0,
         "skipped": 0,
+        "relinked": 0,
+        "ambiguous": 0,
         "unmatched_slugs": [],
         "actions": [],  # per-action debug; small per-session
     }
@@ -202,6 +263,40 @@ def backfill_session(
                 if k.startswith(slug + "-r") or k == slug:
                     run = v
                     break
+
+        # Global fallback: the slug isn't stamped on this hsid, but the
+        # run row might be sitting on a ghost (stale) hsid because of
+        # the Hermes env-propagation bug. Relink ghost→real here so the
+        # dashboard credits the real PM session for the spawn.
+        if run is None:
+            ext = _find_run_on_other_hsid(conn, slug, hermes_session_uuid)
+            if ext is not None:
+                old_hsid = ext["hermes_session_id"]
+                old_is_ghost = _is_ghost_hsid(conn, old_hsid)
+                new_is_real = not _is_ghost_hsid(conn, hermes_session_uuid)
+                if old_is_ghost and new_is_real:
+                    stats["actions"].append({
+                        "kind": "relink",
+                        "slug": slug,
+                        "run_id": ext["id"],
+                        "from": old_hsid,
+                        "to": hermes_session_uuid,
+                    })
+                    if not dry_run:
+                        conn.execute(
+                            "UPDATE hermes_runs SET hermes_session_id=? "
+                            "WHERE id=?",
+                            (hermes_session_uuid, ext["id"]),
+                        )
+                    stats["relinked"] += 1
+                    # Fall through into the close-if-started branch
+                    # below so an in-flight run also gets its terminal
+                    # status stamped in the same pass.
+                    run = ext
+                    by_slug[ext["name"]] = ext
+                else:
+                    stats["ambiguous"] += 1
+                    continue
 
         if run is not None and run["status"] in ("done", "failed", "partial", "abandoned"):
             stats["skipped"] += 1
@@ -303,6 +398,8 @@ def backfill_all(
         "updated": 0,
         "inserted": 0,
         "skipped": 0,
+        "relinked": 0,
+        "ambiguous": 0,
         "sessions_scanned": 0,
         "sessions_with_changes": 0,
         "unmatched_slugs": [],
@@ -348,14 +445,18 @@ def backfill_all(
         aggregate["updated"] += stats["updated"]
         aggregate["inserted"] += stats["inserted"]
         aggregate["skipped"] += stats["skipped"]
+        aggregate["relinked"] += stats["relinked"]
+        aggregate["ambiguous"] += stats["ambiguous"]
         aggregate["unmatched_slugs"].extend(stats["unmatched_slugs"])
-        if stats["updated"] or stats["inserted"]:
+        if stats["updated"] or stats["inserted"] or stats["relinked"]:
             aggregate["sessions_with_changes"] += 1
             if len(aggregate["per_session"]) < 50:
                 aggregate["per_session"].append({
                     "hermes_session_id": hsid,
                     "updated": stats["updated"],
                     "inserted": stats["inserted"],
+                    "relinked": stats["relinked"],
+                    "ambiguous": stats["ambiguous"],
                     "actions": stats["actions"],
                 })
 
@@ -415,13 +516,15 @@ def main(argv: list[str] | None = None) -> int:
             f"[backfill {mode}] scanned={stats['sessions_scanned']} "
             f"changed_sessions={stats['sessions_with_changes']} "
             f"updated={stats['updated']} inserted={stats['inserted']} "
+            f"relinked={stats['relinked']} ambiguous={stats['ambiguous']} "
             f"skipped={stats['skipped']} "
             f"unmatched_slug_count={len(stats['unmatched_slugs'])}"
         )
         for ps in stats["per_session"][:10]:
             print(
                 f"  {ps['hermes_session_id']}: "
-                f"updated={ps['updated']} inserted={ps['inserted']}"
+                f"updated={ps['updated']} inserted={ps['inserted']} "
+                f"relinked={ps.get('relinked', 0)}"
             )
             for a in ps["actions"][:5]:
                 print(f"    {a}")
