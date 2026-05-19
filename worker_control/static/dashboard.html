@@ -631,6 +631,145 @@ body.show-tools .recap-tools { display: block; }
 .root-card .row {
   margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
 }
+
+/* ── transcript modal viewer ─────────────────────────────────────────── */
+body.tr-lock { overflow: hidden; }
+.tr-trigger {
+  background: transparent; border: 1px solid var(--line-strong);
+  color: var(--info); padding: 2px 8px; border-radius: 6px;
+  font-family: var(--mono); font-size: var(--fs-sm); cursor: pointer;
+}
+.tr-trigger:hover { background: var(--info-dim); }
+#tr-modal {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.78);
+  z-index: 9999;
+  padding: 4vh 4vw;
+}
+#tr-modal.open { display: flex; }
+.tr-shell {
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  width: 100%; height: 100%;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.tr-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  display: flex; flex-direction: column; gap: 8px;
+  flex: 0 0 auto;
+}
+.tr-head .row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.tr-head .tr-path {
+  font-family: var(--mono); font-size: var(--fs-sm);
+  color: var(--text-2); word-break: break-all; flex: 1 1 240px;
+}
+.tr-head .badge.format {
+  font-family: var(--mono); font-size: var(--fs-xs);
+  color: var(--accent); background: var(--accent-dim);
+  padding: 2px 8px; border-radius: 6px;
+}
+.tr-head .meta {
+  font-family: var(--mono); font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.tr-head input.tr-search,
+.tr-head select.tr-jump {
+  background: var(--bg-2); color: var(--text-0);
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  padding: 4px 8px; font-family: var(--mono); font-size: var(--fs-sm);
+}
+.tr-head input.tr-search { flex: 1 1 200px; }
+.tr-head select.tr-jump { max-width: 280px; }
+.tr-head input.tr-search:focus,
+.tr-head select.tr-jump:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.tr-head button {
+  background: var(--bg-3); color: var(--text-0);
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  padding: 4px 10px; font-family: var(--mono); font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.tr-head button:hover { background: var(--bg-2); border-color: var(--accent); }
+.tr-body {
+  flex: 1 1 auto; overflow-y: auto; padding: 12px 16px;
+  background: var(--bg-0);
+}
+.tr-loading, .tr-err {
+  padding: 20px; color: var(--text-1);
+  font-family: var(--mono); display: flex; flex-direction: column;
+  gap: 12px; align-items: flex-start;
+}
+.tr-err { color: var(--danger); }
+.tr-card {
+  margin: 0 0 10px 0;
+  padding: 8px 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--muted);
+  border-radius: 8px;
+}
+.tr-card.role-user      { border-left-color: var(--accent); }
+.tr-card.role-assistant { border-left-color: var(--info); }
+.tr-card.role-system    { border-left-color: var(--muted); }
+.tr-card.role-tool      { border-left-color: var(--warn); }
+.tr-card.hidden { display: none; }
+.tr-card-head {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 6px;
+  font-family: var(--mono); font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.tr-card-head .role-badge {
+  padding: 1px 8px; border-radius: 4px;
+  font-size: var(--fs-xs); letter-spacing: 0.08em; text-transform: uppercase;
+}
+.tr-card.role-user      .role-badge { color: var(--accent); background: var(--accent-dim); }
+.tr-card.role-assistant .role-badge { color: var(--info);   background: var(--info-dim); }
+.tr-card.role-system    .role-badge { color: var(--text-2); background: var(--bg-3); }
+.tr-card.role-tool      .role-badge { color: var(--warn);   background: var(--warn-dim); }
+.tr-card-head .turn-idx { color: var(--text-3); }
+.tr-card pre {
+  margin: 0; padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--mono); font-size: var(--fs-sm);
+  color: var(--text-0);
+  white-space: pre-wrap; word-break: break-word;
+  overflow-x: auto;
+}
+.tr-card details {
+  margin-top: 6px; background: var(--bg-2);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 8px;
+}
+.tr-card details summary {
+  cursor: pointer; font-family: var(--mono); font-size: var(--fs-xs);
+  color: var(--text-2); padding: 2px 0;
+}
+.tr-card details[open] summary { color: var(--accent); }
+.tr-card details pre {
+  margin-top: 6px;
+  background: var(--bg-3); border-color: var(--line-strong);
+}
+.tr-card mark.tr-hit {
+  background: var(--warn); color: var(--bg-0);
+  padding: 0 2px; border-radius: 2px;
+}
+.tr-empty {
+  padding: 24px; color: var(--text-3);
+  font-family: var(--mono); text-align: center;
+}
 </style>
 </head>
 <body>
@@ -927,6 +1066,8 @@ body.show-tools .recap-tools { display: block; }
   </div>
 
 </main>
+
+<div id="tr-modal" role="dialog" aria-modal="true" aria-label="transcript viewer"></div>
 
 <script id="dashboard-data" type="application/json">"__INLINE_DATA__"</script>
 <script>
@@ -1705,15 +1846,18 @@ body.show-tools .recap-tools { display: block; }
     }
     function transcriptCell(r) {
       if (!r.transcript) return "<span class='path'>(file not found)</span>";
-      // file:/// URL — browsers may block local file links, but pasting/
-      // right-click-copy still works. We also expose a "open dir" link.
+      // Browsers block file:// from http:// origins, so open via the BFF
+      // /api/transcript endpoint and render in a modal. The raw file:///
+      // link is kept (title only) so users can right-click → copy path.
       const fileUrl = "file:///" + r.transcript.replace(/\\\\/g, "/");
       const sizeKb = r.transcript_size
         ? "<span class='path'>" + (r.transcript_size / 1024).toFixed(1) + " KB</span>"
         : "";
-      return "<a href='" + escapeHtml(fileUrl) + "' target='_blank'"
-           + " title='" + escapeHtml(r.transcript) + "'>"
-           + "📄 transcript</a> "
+      return "<button type='button' class='tr-trigger tr-open' "
+           + "data-tr-path='" + escapeHtml(r.transcript) + "' "
+           + "title='" + escapeHtml(r.transcript) + "'>📄 view</button> "
+           + "<a href='" + escapeHtml(fileUrl) + "' target='_blank' "
+           + "class='path' title='경로 복사용 (브라우저는 보통 차단)'>file://</a> "
            + sizeKb;
     }
     function spawnList(r) {
@@ -2232,6 +2376,267 @@ body.show-tools .recap-tools { display: block; }
     const cls = role === "owned_work" ? "accent"
               : role === "public_reference" ? "warn" : "muted";
     return "<span class='badge " + cls + " plain'>" + escapeHtml(role || "other") + "</span>";
+  }
+
+  // ── transcript modal viewer ──────────────────────────────────────────
+  // Wire once at module load — the trigger buttons are re-rendered every
+  // snapshot poll, so we use event delegation on document instead.
+  let trHljsTried = false;
+  let trHljsReady = false;
+  function tryLoadHljs() {
+    if (trHljsTried) return;
+    trHljsTried = true;
+    try {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css";
+      link.onerror = function() { /* CSS blocked — plain mono still works */ };
+      document.head.appendChild(link);
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js";
+      s.onload = function() {
+        try {
+          trHljsReady = typeof window.hljs !== "undefined";
+        } catch (_) { trHljsReady = false; }
+      };
+      s.onerror = function() { /* offline / corp proxy — fall back */ };
+      document.head.appendChild(s);
+    } catch (_) { /* fall back to plain mono */ }
+  }
+
+  document.addEventListener("click", function(e) {
+    const btn = e.target.closest(".tr-open");
+    if (!btn) return;
+    e.preventDefault();
+    openTranscriptModal(btn.getAttribute("data-tr-path"));
+  });
+
+  document.addEventListener("keydown", function(e) {
+    if (e.key !== "Escape") return;
+    const modal = document.getElementById("tr-modal");
+    if (modal && modal.classList.contains("open")) closeTranscriptModal();
+  });
+
+  function closeTranscriptModal() {
+    const modal = document.getElementById("tr-modal");
+    if (!modal) return;
+    modal.classList.remove("open");
+    modal.innerHTML = "";
+    document.body.classList.remove("tr-lock");
+  }
+
+  async function openTranscriptModal(path) {
+    tryLoadHljs();
+    const modal = document.getElementById("tr-modal");
+    if (!modal) return;
+    modal.classList.add("open");
+    modal.innerHTML = "<div class='tr-shell'><div class='tr-loading'>loading…</div></div>";
+    document.body.classList.add("tr-lock");
+    // backdrop click → close
+    modal.onclick = function(ev) {
+      if (ev.target === modal) closeTranscriptModal();
+    };
+    try {
+      const r = await fetch("/api/transcript?path=" + encodeURIComponent(path));
+      if (!r.ok) {
+        const err = await r.json().catch(function() { return {}; });
+        modal.innerHTML = "<div class='tr-shell'><div class='tr-err'>"
+          + "Error " + r.status + ": "
+          + escapeHtml(err.detail || err.error || r.statusText)
+          + "<button type='button' class='tr-close'>닫기</button>"
+          + "</div></div>";
+        modal.querySelector(".tr-close").onclick = closeTranscriptModal;
+        return;
+      }
+      const data = await r.json();
+      renderTranscript(modal, data);
+    } catch (exc) {
+      modal.innerHTML = "<div class='tr-shell'><div class='tr-err'>"
+        + escapeHtml(String(exc))
+        + "<button type='button' class='tr-close'>닫기</button>"
+        + "</div></div>";
+      modal.querySelector(".tr-close").onclick = closeTranscriptModal;
+    }
+  }
+
+  function renderTranscript(modal, data) {
+    const fmt = data.format || "?";
+    const sizeKb = data.size != null ? (data.size / 1024).toFixed(1) + " KB" : "—";
+    const mtime = data.mtime || "—";
+    const turns = data.turns || [];
+    // Head
+    const head = ""
+      + "<div class='tr-head'>"
+      +   "<div class='row'>"
+      +     "<span class='badge format'>" + escapeHtml(fmt) + "</span>"
+      +     "<span class='tr-path' title='" + escapeHtml(data.path || "") + "'>"
+      +       escapeHtml(data.path || "") + "</span>"
+      +     "<span class='meta'>" + escapeHtml(sizeKb) + " · " + escapeHtml(mtime)
+      +       " · " + turns.length + " turns</span>"
+      +     "<button type='button' class='tr-download' title='download JSON'>↓</button>"
+      +     "<button type='button' class='tr-close' title='close (Esc)'>✕</button>"
+      +   "</div>"
+      +   "<div class='row'>"
+      +     "<input type='text' class='tr-search' placeholder='filter turns (case-insensitive)…' />"
+      +     "<select class='tr-jump'>"
+      +       "<option value=''>jump to turn…</option>"
+      +       turns.map(function(t, i) {
+              const preview = (t.text || "").replace(/\s+/g, " ").slice(0, 24);
+              return "<option value='" + i + "'>"
+                + "T" + i + " " + escapeHtml(t.role || "?")
+                + (preview ? " · " + escapeHtml(preview) : "")
+                + "</option>";
+            }).join("")
+      +     "</select>"
+      +   "</div>"
+      + "</div>";
+    // Body
+    let body;
+    if (turns.length === 0) {
+      body = "<div class='tr-body'><div class='tr-empty'>(no turns parsed)</div></div>";
+    } else {
+      body = "<div class='tr-body'>"
+        + turns.map(function(t, i) { return renderTurnCard(t, i); }).join("")
+        + "</div>";
+    }
+    modal.innerHTML = "<div class='tr-shell'>" + head + body + "</div>";
+
+    // Wire up controls
+    modal.querySelector(".tr-close").onclick = closeTranscriptModal;
+    modal.querySelector(".tr-download").onclick = function() {
+      downloadJson(data);
+    };
+    const jump = modal.querySelector(".tr-jump");
+    jump.onchange = function() {
+      if (!jump.value) return;
+      const card = modal.querySelector("#tr-card-" + jump.value);
+      if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+      jump.value = "";
+    };
+    const search = modal.querySelector(".tr-search");
+    search.addEventListener("input", function() {
+      applyTranscriptSearch(modal, search.value);
+    });
+
+    // Apply highlight.js to JSON <pre><code> blocks if available.
+    if (trHljsReady && window.hljs) {
+      modal.querySelectorAll(".tr-body pre code.lang-json").forEach(function(el) {
+        try { window.hljs.highlightElement(el); } catch (_) {}
+      });
+    }
+  }
+
+  function renderTurnCard(t, i) {
+    const role = (t.role || "system");
+    const roleCls = ["user", "assistant", "system", "tool"].indexOf(role) >= 0
+      ? role : "system";
+    const ts = t.ts ? "<span class='ts'>" + escapeHtml(t.ts) + "</span>" : "";
+    const text = (t.text || "");
+    const textBlock = text
+      ? "<pre>" + escapeHtml(text) + "</pre>"
+      : "<pre class='empty'>(empty)</pre>";
+    let thinking = "";
+    if (t.thinking) {
+      thinking = "<details><summary>thinking</summary>"
+        + "<pre>" + escapeHtml(t.thinking) + "</pre></details>";
+    }
+    let toolBlocks = "";
+    if (Array.isArray(t.tool_calls) && t.tool_calls.length > 0) {
+      toolBlocks = t.tool_calls.map(function(tc) {
+        const name = tc.name || "?";
+        const args = tc.args || "";
+        return "<details><summary>tool · " + escapeHtml(name) + "</summary>"
+          + "<pre><code class='lang-json'>"
+          + escapeHtml(args) + "</code></pre></details>";
+      }).join("");
+    }
+    return "<div class='tr-card role-" + roleCls + "' id='tr-card-" + i + "'>"
+      + "<div class='tr-card-head'>"
+      +   "<span class='turn-idx'>T" + i + "</span>"
+      +   "<span class='role-badge'>" + escapeHtml(role) + "</span>"
+      +   ts
+      + "</div>"
+      + textBlock
+      + thinking
+      + toolBlocks
+      + "</div>";
+  }
+
+  function applyTranscriptSearch(modal, q) {
+    q = (q || "").trim().toLowerCase();
+    const cards = modal.querySelectorAll(".tr-card");
+    cards.forEach(function(card) {
+      // Strip existing highlights first.
+      card.querySelectorAll("mark.tr-hit").forEach(function(m) {
+        const tx = document.createTextNode(m.textContent);
+        m.parentNode.replaceChild(tx, m);
+      });
+      if (!q) {
+        card.classList.remove("hidden");
+        return;
+      }
+      const hay = card.textContent.toLowerCase();
+      if (hay.indexOf(q) === -1) {
+        card.classList.add("hidden");
+      } else {
+        card.classList.remove("hidden");
+        highlightInCard(card, q);
+      }
+    });
+  }
+
+  function highlightInCard(card, q) {
+    // Walk text nodes inside <pre> only — avoid wrapping inside element nodes.
+    card.querySelectorAll("pre").forEach(function(pre) {
+      const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT, null);
+      const nodes = [];
+      let n; while ((n = walker.nextNode())) nodes.push(n);
+      nodes.forEach(function(node) {
+        const txt = node.nodeValue;
+        const low = txt.toLowerCase();
+        let idx = low.indexOf(q);
+        if (idx === -1) return;
+        const frag = document.createDocumentFragment();
+        let cursor = 0;
+        while (idx !== -1) {
+          if (idx > cursor) {
+            frag.appendChild(document.createTextNode(txt.slice(cursor, idx)));
+          }
+          const mark = document.createElement("mark");
+          mark.className = "tr-hit";
+          mark.textContent = txt.slice(idx, idx + q.length);
+          frag.appendChild(mark);
+          cursor = idx + q.length;
+          idx = low.indexOf(q, cursor);
+        }
+        if (cursor < txt.length) {
+          frag.appendChild(document.createTextNode(txt.slice(cursor)));
+        }
+        node.parentNode.replaceChild(frag, node);
+      });
+    });
+  }
+
+  function downloadJson(data) {
+    try {
+      const blob = new Blob(
+        [JSON.stringify(data, null, 2)],
+        { type: "application/json" }
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const base = (data.path || "transcript").split(/[\\/]/).pop() || "transcript";
+      a.download = base.replace(/\.(json|jsonl)$/i, "") + ".normalized.json";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function() {
+        URL.revokeObjectURL(url);
+        a.remove();
+      }, 0);
+    } catch (exc) {
+      alert("download failed: " + exc);
+    }
   }
 })();
 </script>
