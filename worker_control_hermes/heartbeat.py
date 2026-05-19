@@ -371,9 +371,9 @@ def classify_sessions(window_min: int) -> dict:
         # Trim the noisy per-session breakdown out of the heartbeat log
         # — leave just the headline counters.
         _bf_brief = {
-            k: _bf_stats[k] for k in
+            k: _bf_stats.get(k, 0) for k in
             ("sessions_scanned", "sessions_with_changes",
-             "updated", "inserted", "skipped")
+             "updated", "inserted", "relinked", "ambiguous", "skipped")
         }
         print(f"[spawn-backfill] {_bf_brief}", file=sys.stderr)
     except Exception as e:
