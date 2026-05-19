@@ -62,9 +62,38 @@ CREATE TABLE hermes_agent_sessions (
     transcript_mtime  TEXT,
     started_at        TEXT,
     ended_at          TEXT,
-    synced_at         TEXT NOT NULL
+    synced_at         TEXT NOT NULL,
+    ai_title          TEXT,
+    first_user_text   TEXT,
+    turn_count        INTEGER,
+    msg_user          INTEGER
 );
 """
+
+
+def _insert_agent_session(
+    conn: sqlite3.Connection,
+    hsid: str,
+    *,
+    ghost: bool,
+    transcript_path: str = "",
+) -> None:
+    if ghost:
+        conn.execute(
+            "INSERT INTO hermes_agent_sessions "
+            "(hermes_session_id, profile_name, transcript_path, transcript_mtime, "
+            " synced_at, ai_title, first_user_text, turn_count, msg_user) "
+            "VALUES (?, 'default', ?, ?, ?, NULL, NULL, 1, 0)",
+            (hsid, transcript_path, _old_iso(1), _now_iso()),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO hermes_agent_sessions "
+            "(hermes_session_id, profile_name, transcript_path, transcript_mtime, "
+            " synced_at, ai_title, first_user_text, turn_count, msg_user) "
+            "VALUES (?, 'default', ?, ?, ?, 'real PM', 'do the thing', 7, 4)",
+            (hsid, transcript_path, _old_iso(1), _now_iso()),
+        )
 
 
 def _fresh_db(tmp_path: Path) -> sqlite3.Connection:
@@ -465,6 +494,7 @@ def test_classify_sessions_calls_backfill(monkeypatch, tmp_path: Path) -> None:
         return {
             "sessions_scanned": 0, "sessions_with_changes": 0,
             "updated": 0, "inserted": 0, "skipped": 0,
+            "relinked": 0, "ambiguous": 0,
             "unmatched_slugs": [], "per_session": [],
         }
 
@@ -474,6 +504,171 @@ def test_classify_sessions_calls_backfill(monkeypatch, tmp_path: Path) -> None:
     assert calls["n"] == 1
     # Sanity — pipeline still returned a snapshot dict.
     assert "alive" in snap and "idle" in snap
+
+
+# ---------------------------------------------------------------------------
+# relink — ghost hsid → real hsid
+# ---------------------------------------------------------------------------
+
+def _seed_run_on_hsid(
+    conn: sqlite3.Connection,
+    *,
+    session_pk: int,
+    uuid: str,
+    slug_name: str,
+    hsid: str,
+    status: str = "started",
+) -> None:
+    conn.execute(
+        "INSERT INTO hermes_sessions (id, uuid, project_id, name, origin, "
+        "created_at, last_used_at) VALUES (?, ?, 1, ?, 'spawned', ?, ?)",
+        (session_pk, uuid, slug_name, _now_iso(), _now_iso()),
+    )
+    conn.execute(
+        "INSERT INTO hermes_runs (session_id, run_index, name, mode, command, "
+        "status, started_at, hermes_session_id) "
+        "VALUES (?, 1, ?, 'print', '', ?, ?, ?)",
+        (session_pk, slug_name, status, _old_iso(3), hsid),
+    )
+
+
+def test_relink_orphan_run_from_ghost_hsid(tmp_path: Path) -> None:
+    conn = _fresh_db(tmp_path)
+    ghost_hsid = "20260519_100000_ghosty"
+    real_hsid = "20260519_102213_cc5ea1"
+
+    _insert_agent_session(conn, ghost_hsid, ghost=True)
+    transcript = tmp_path / "real.json"
+    transcript.write_text(
+        "aok-spawn ...\nspawn a-ok:foo-r1 ...\nexit=0\n", encoding="utf-8"
+    )
+    _insert_agent_session(
+        conn, real_hsid, ghost=False, transcript_path=str(transcript)
+    )
+    _seed_run_on_hsid(
+        conn, session_pk=100, uuid="uuid-child-100",
+        slug_name="a-ok:foo-r1", hsid=ghost_hsid, status="started",
+    )
+    conn.commit()
+
+    stats = backfill_session(
+        conn, real_hsid, str(transcript),
+        now_iso=_now_iso(), transcript_mtime=_old_iso(1),
+    )
+
+    assert stats["relinked"] == 1
+    assert stats["updated"] == 1
+    assert stats["ambiguous"] == 0
+    row = conn.execute(
+        "SELECT hermes_session_id, status FROM hermes_runs "
+        "WHERE name='a-ok:foo-r1'"
+    ).fetchone()
+    assert row["hermes_session_id"] == real_hsid
+    assert row["status"] == "done"
+
+
+def test_relink_skipped_when_both_real(tmp_path: Path) -> None:
+    conn = _fresh_db(tmp_path)
+    other_real_hsid = "20260519_101010_otherr"
+    real_hsid = "20260519_102213_cc5ea1"
+
+    _insert_agent_session(conn, other_real_hsid, ghost=False)
+    transcript = tmp_path / "real.json"
+    transcript.write_text(
+        "aok-spawn ...\nspawn a-ok:foo-r1 ...\nexit=0\n", encoding="utf-8"
+    )
+    _insert_agent_session(
+        conn, real_hsid, ghost=False, transcript_path=str(transcript)
+    )
+    _seed_run_on_hsid(
+        conn, session_pk=101, uuid="uuid-child-101",
+        slug_name="a-ok:foo-r1", hsid=other_real_hsid, status="started",
+    )
+    conn.commit()
+
+    stats = backfill_session(
+        conn, real_hsid, str(transcript),
+        now_iso=_now_iso(), transcript_mtime=_old_iso(1),
+    )
+
+    assert stats["relinked"] == 0
+    assert stats["ambiguous"] == 1
+    row = conn.execute(
+        "SELECT hermes_session_id, status FROM hermes_runs "
+        "WHERE name='a-ok:foo-r1'"
+    ).fetchone()
+    assert row["hermes_session_id"] == other_real_hsid
+    assert row["status"] == "started"
+
+
+def test_relink_skipped_when_transcript_hsid_ghost(tmp_path: Path) -> None:
+    conn = _fresh_db(tmp_path)
+    real_other_hsid = "20260519_101010_realer"
+    ghost_current_hsid = "20260519_102213_ghost1"
+
+    _insert_agent_session(conn, real_other_hsid, ghost=False)
+    transcript = tmp_path / "ghost.json"
+    transcript.write_text(
+        "aok-spawn ...\nspawn a-ok:foo-r1 ...\nexit=0\n", encoding="utf-8"
+    )
+    _insert_agent_session(
+        conn, ghost_current_hsid, ghost=True, transcript_path=str(transcript)
+    )
+    _seed_run_on_hsid(
+        conn, session_pk=102, uuid="uuid-child-102",
+        slug_name="a-ok:foo-r1", hsid=real_other_hsid, status="started",
+    )
+    conn.commit()
+
+    stats = backfill_session(
+        conn, ghost_current_hsid, str(transcript),
+        now_iso=_now_iso(), transcript_mtime=_old_iso(1),
+    )
+
+    assert stats["relinked"] == 0
+    assert stats["ambiguous"] == 1
+    row = conn.execute(
+        "SELECT hermes_session_id, status FROM hermes_runs "
+        "WHERE name='a-ok:foo-r1'"
+    ).fetchone()
+    assert row["hermes_session_id"] == real_other_hsid
+    assert row["status"] == "started"
+
+
+def test_dry_run_no_relink_mutation(tmp_path: Path) -> None:
+    conn = _fresh_db(tmp_path)
+    ghost_hsid = "20260519_100000_ghosty"
+    real_hsid = "20260519_102213_cc5ea1"
+
+    _insert_agent_session(conn, ghost_hsid, ghost=True)
+    transcript = tmp_path / "real.json"
+    transcript.write_text(
+        "aok-spawn ...\nspawn a-ok:foo-r1 ...\nexit=0\n", encoding="utf-8"
+    )
+    _insert_agent_session(
+        conn, real_hsid, ghost=False, transcript_path=str(transcript)
+    )
+    _seed_run_on_hsid(
+        conn, session_pk=103, uuid="uuid-child-103",
+        slug_name="a-ok:foo-r1", hsid=ghost_hsid, status="started",
+    )
+    conn.commit()
+
+    stats = backfill_session(
+        conn, real_hsid, str(transcript),
+        now_iso=_now_iso(), transcript_mtime=_old_iso(1),
+        dry_run=True,
+    )
+
+    assert stats["relinked"] == 1
+    row = conn.execute(
+        "SELECT hermes_session_id, status, ended_at FROM hermes_runs "
+        "WHERE name='a-ok:foo-r1'"
+    ).fetchone()
+    # DB must be untouched in dry-run mode — neither hsid nor status moves.
+    assert row["hermes_session_id"] == ghost_hsid
+    assert row["status"] == "started"
+    assert row["ended_at"] is None
 
 
 def test_cli_dry_run_emits_json(tmp_path: Path, monkeypatch, capsys) -> None:
