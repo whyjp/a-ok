@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import os
 import webbrowser
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -54,6 +55,20 @@ from worker_control.sessions import list_sessions
 
 
 DEFAULT_OUTPUT_FILENAME = "dashboard.html"
+
+# Policy used when the snapshot consumer doesn't override. The env var
+# lets ops flip back to "off" (1:1 row→card) without a code change while
+# the FE work to surface ``+N`` sibling badges is still landing.
+_DEDUP_POLICY_ENV = "WORKER_CONTROL_DEDUP_POLICY"
+_DEDUP_POLICY_DEFAULT = "by_name_within_hsid"
+_DEDUP_POLICY_VALID = {"off", "by_name", "by_name_within_hsid"}
+
+
+def _resolve_dedup_policy() -> str:
+    raw = (os.environ.get(_DEDUP_POLICY_ENV) or "").strip()
+    if raw in _DEDUP_POLICY_VALID:
+        return raw
+    return _DEDUP_POLICY_DEFAULT
 
 # 패키지에 포함된 FE 자산. BFF 가 그대로 서빙하고, legacy 경로에서는
 # placeholder 를 인라인 데이터로 치환해서 단일 HTML 로 내보낸다.
@@ -104,6 +119,10 @@ class DashboardSnapshot:
     native_root_exists: bool = False
     native_note: str | None = None
     counters: dict[str, int] = field(default_factory=dict)
+    # SELECT-axis dedup policy actually used to build this snapshot.
+    # Exposed so the FE can branch on policy (e.g. show a ``+N`` badge only
+    # when dedup is active) without re-reading the env var.
+    dedup_policy: str = _DEDUP_POLICY_DEFAULT
 
 
 def _profile_to_dict(p) -> dict[str, Any]:
@@ -227,6 +246,10 @@ def _session_view_to_dict(v: SessionView) -> dict[str, Any]:
         "tools_recent":        v.tools_recent,
         "recap_native":        v.recaps,
         "pending_queue":       v.pending_queue,
+        # Sibling UUIDs collapsed into this row by the SELECT-axis dedup
+        # policy. Always a list (possibly empty) so the FE can render a
+        # ``+N`` badge without null-checking.
+        "superseded_by":       list(v.superseded_by),
     }
 
 
@@ -393,8 +416,9 @@ def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
     #    + _load_parity_extras + _merge_parity_extras). Each SessionView row
     #    already carries the parity payload + child arrays, so the FE dict
     #    is just a flat dump — no LEFT JOIN logic stays in dashboard.py.
+    dedup_policy = _resolve_dedup_policy()
     try:
-        ledger: list[SessionView] = list_session_views()
+        ledger: list[SessionView] = list_session_views(group_dupes=dedup_policy)
     except Exception:
         ledger = []
     scv_rows: list[SessionView]    = []
@@ -467,6 +491,7 @@ def collect_snapshot(native_limit: int | None = 500) -> DashboardSnapshot:
         native_root=native.root,
         native_root_exists=native.root_exists,
         native_note=native.note,
+        dedup_policy=dedup_policy,
         counters={
             "profiles": len(profiles),
             "hermes_profiles": len(hermes_profs),
@@ -521,6 +546,7 @@ def snapshot_to_payload(snap: DashboardSnapshot) -> dict[str, Any]:
         "native_root_exists": snap.native_root_exists,
         "native_note": snap.native_note,
         "counters": snap.counters,
+        "dedup_policy": snap.dedup_policy,
     }
 
 
