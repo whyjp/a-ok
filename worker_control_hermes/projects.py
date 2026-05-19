@@ -473,6 +473,131 @@ def _resolve_session(conn: sqlite3.Connection, key: str) -> sqlite3.Row | None:
     return None
 
 
+_DUPLICATE_NAME_WINDOW_SECONDS = 60
+
+
+def _parse_iso_utc(s: str | None) -> _dt.datetime | None:
+    if not s:
+        return None
+    try:
+        d = _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.timezone.utc)
+    return d
+
+
+def _sweep_stale_name_dupes(
+    conn: sqlite3.Connection,
+    project_id: int,
+    name: str,
+    *,
+    window_seconds: int = _DUPLICATE_NAME_WINDOW_SECONDS,
+    now_dt: _dt.datetime | None = None,
+) -> dict | None:
+    """Handle ``(project_id, name, status='active')`` collisions.
+
+    Kept separate from ``upsert_session`` so the set-once / monotonic
+    invariants there stay intact. Behaviour:
+
+    * No existing active row → return None.
+    * Existing active row younger than ``window_seconds`` → return a
+      ``{"action": "duplicate_within_window", ...}`` summary so the
+      caller can refuse the new INSERT.
+    * Existing active row older than ``window_seconds`` → transition it
+      (and any still-``started`` run on it) to ``abandoned`` and return
+      ``{"action": "swept", ...}``. The caller is then free to INSERT.
+    """
+    rows = conn.execute(
+        "SELECT id, uuid, last_used_at, created_at FROM hermes_sessions "
+        "WHERE project_id=? AND name=? AND status='active' "
+        "ORDER BY id DESC",
+        (project_id, name),
+    ).fetchall()
+    if not rows:
+        return None
+    t_now = now_dt or _dt.datetime.now(_dt.timezone.utc)
+    newest = rows[0]
+    last_used = _parse_iso_utc(newest["last_used_at"]) or _parse_iso_utc(newest["created_at"])
+    age = (t_now - last_used).total_seconds() if last_used else float("inf")
+    if age <= window_seconds:
+        existing_run = conn.execute(
+            "SELECT id FROM hermes_runs WHERE session_id=? AND status='started' "
+            "ORDER BY id DESC LIMIT 1",
+            (newest["id"],),
+        ).fetchone()
+        return {
+            "action": "duplicate_within_window",
+            "existing_uuid": newest["uuid"],
+            "existing_session_id": int(newest["id"]),
+            "existing_run_id": int(existing_run["id"]) if existing_run else None,
+            "age_seconds": int(age),
+            "window_seconds": window_seconds,
+        }
+    # age > window — sweep ALL active rows with this (project,name) to abandoned,
+    # not just the newest; an INSERT/INSERT race could have left multiples.
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    swept_session_ids = [int(r["id"]) for r in rows]
+    swept_run_ids: list[int] = []
+    for sid in swept_session_ids:
+        run_rows = conn.execute(
+            "SELECT id FROM hermes_runs WHERE session_id=? AND status='started'",
+            (sid,),
+        ).fetchall()
+        swept_run_ids.extend(int(r["id"]) for r in run_rows)
+    conn.executemany(
+        "UPDATE hermes_sessions SET status='abandoned', ended_at=?, last_used_at=? WHERE id=?",
+        [(now_iso, now_iso, sid) for sid in swept_session_ids],
+    )
+    if swept_run_ids:
+        conn.executemany(
+            "UPDATE hermes_runs SET status='abandoned', ended_at=?, "
+            "note=COALESCE(NULLIF(note,''), '') || ? WHERE id=?",
+            [(now_iso, "dup-name-sweep age>{}s".format(window_seconds), rid)
+             for rid in swept_run_ids],
+        )
+    return {
+        "action": "swept",
+        "swept_session_ids": swept_session_ids,
+        "swept_run_ids": swept_run_ids,
+        "age_seconds": int(age),
+        "window_seconds": window_seconds,
+    }
+
+
+class _PreflightError(RuntimeError):
+    """Emitted bash command failed ``bash -n`` syntax preflight."""
+
+
+def _bash_preflight(cmd: str) -> None:
+    """Run ``bash -n`` against ``cmd``. Raise ``_PreflightError`` on syntax error.
+
+    The check is best-effort: when no usable bash is on PATH (rare on CI
+    docker images that strip msys), we skip silently rather than block
+    every dispatch. Set ``WORKER_CONTROL_BASH_PREFLIGHT=skip`` to force
+    skip in that environment; ``=require`` to fail if no bash binary.
+    """
+    mode = os.environ.get("WORKER_CONTROL_BASH_PREFLIGHT", "auto").lower()
+    if mode == "skip":
+        return
+    try:
+        proc = subprocess.run(
+            ["bash", "-n", "-c", cmd],
+            capture_output=True, text=True, timeout=10,
+        )
+    except FileNotFoundError:
+        if mode == "require":
+            raise _PreflightError("bash not on PATH; preflight required by env")
+        return
+    except subprocess.TimeoutExpired:
+        raise _PreflightError("bash -n timed out (>10s)")
+    if proc.returncode != 0:
+        raise _PreflightError(
+            (proc.stderr or proc.stdout or "bash -n failed").strip()
+        )
+
+
 def cmd_session_start(args: argparse.Namespace) -> None:
     """Allocate a new session UUID for a project and print the claude command.
 
@@ -480,6 +605,7 @@ def cmd_session_start(args: argparse.Namespace) -> None:
     Subsequent invocations should use `run start <session>` (which uses
     --resume instead of --session-id).
     """
+    extra_flags = (getattr(args, "extra_flags", "") or "").strip()
     with _connect() as conn:
         proj = _resolve_key(conn, args.project)
         if not proj:
@@ -497,6 +623,29 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         # still lands in the spawn tab. Idempotent: never doubles up.
         base_name = _ensure_a_ok_prefix(base_name)
         now = _now()
+
+        # Duplicate-name guard (P0 §3). Runs BEFORE the INSERT so set-once
+        # invariants in upsert_session don't get a stale row to clobber.
+        dupe = _sweep_stale_name_dupes(conn, int(proj["id"]), base_name)
+        if dupe and dupe["action"] == "duplicate_within_window":
+            msg = (
+                f"[workerctl] duplicate within {dupe['window_seconds']}s window: "
+                f"project={proj['folder_path']} name={base_name!r} "
+                f"existing_uuid={dupe['existing_uuid']} "
+                f"existing_run_id={dupe['existing_run_id']} "
+                f"age={dupe['age_seconds']}s — reuse the existing session"
+            )
+            print(msg, file=sys.stderr)
+            if getattr(args, "json", False):
+                print(json.dumps({
+                    "error": "duplicate",
+                    "existing_uuid": dupe["existing_uuid"],
+                    "existing_run_id": dupe["existing_run_id"],
+                    "existing_session_id": dupe["existing_session_id"],
+                    "age_seconds": dupe["age_seconds"],
+                    "window_seconds": dupe["window_seconds"],
+                }, ensure_ascii=False))
+            raise SystemExit(2)
         # Single-writer path — every hermes_sessions INSERT/UPDATE goes
         # through worker_control.session_sync.upsert_session. This call
         # site used to inline the INSERT with its own column list, which
@@ -551,8 +700,14 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         # exactly what was emitted to the PM agent. ``--no-auto-close``
         # opts back into the legacy raw form.
         auto_close = not getattr(args, "no_auto_close", False)
-        cmd = _wrap_self_close(raw_cmd, run_id) if auto_close else raw_cmd
         if auto_close:
+            cmd = _wrap_self_close(raw_cmd, run_id, extra_flags=extra_flags)
+        else:
+            # Legacy raw form: extra_flags get appended bare. The caller
+            # opted out of the trap wrapper; we still keep the command
+            # self-contained so post-emit string surgery isn't needed.
+            cmd = f"{raw_cmd} {extra_flags}".rstrip() if extra_flags else raw_cmd
+        if cmd != raw_cmd:
             conn.execute(
                 "UPDATE hermes_runs SET command=? WHERE id=?",
                 (cmd, run_id),
@@ -560,6 +715,20 @@ def cmd_session_start(args: argparse.Namespace) -> None:
         # The brand-new session is now eligible for `spawned` classification
         # if this first run is print-mode. Reclassify once.
         _reclassify_origins(conn)
+
+        # Preflight (P0 §1). The bash -n check runs INSIDE this `with _connect()`
+        # block so a syntax error rolls back every INSERT above (sqlite3
+        # connection context manager commits on clean exit, rolls back on
+        # exception). Raise SystemExit instead of _PreflightError so the
+        # CLI surface is a clean nonzero exit; the rollback still fires
+        # because SystemExit propagates as an exception out of the with.
+        try:
+            _bash_preflight(cmd)
+        except _PreflightError as e:
+            raise SystemExit(
+                f"[workerctl] dry-allocation preflight failed: {e}. "
+                "No rows inserted."
+            )
 
     payload = {
         "uuid": uid,
@@ -584,7 +753,7 @@ def cmd_session_start(args: argparse.Namespace) -> None:
     print(f"  command    : {cmd}")
 
 
-def _wrap_self_close(raw_cmd: str, run_id: int) -> str:
+def _wrap_self_close(raw_cmd: str, run_id: int, *, extra_flags: str = "") -> str:
     """Wrap ``raw_cmd`` in a bash subshell that calls ``run end`` on exit.
 
     The wrapper is bash-only (git-bash / MSYS on Windows, regular bash on
@@ -606,6 +775,11 @@ def _wrap_self_close(raw_cmd: str, run_id: int) -> str:
         not override it (no explicit ``exit`` inside the trap).
       * The ``run end`` call is best-effort (``|| true``) so a missing
         entry-point on PATH never masks the real exit code.
+      * ``extra_flags`` (e.g. ``--output-format json``) get appended to
+        ``raw_cmd`` INSIDE the subshell so callers don't have to splice
+        them in after the closing ``)`` (which would break the trap
+        wrap with a syntax error). The string is inserted verbatim —
+        the caller is responsible for quoting.
     """
     # Single-quoted trap body keeps every $… literal until the trap
     # actually fires. The raw command lives OUTSIDE this quoted span,
@@ -617,7 +791,8 @@ def _wrap_self_close(raw_cmd: str, run_id: int) -> str:
         "--status $( [ \"$__rc\" = \"0\" ] && echo done || echo failed ) "
         "--note \"exit=$__rc\" >/dev/null 2>&1 || true"
     )
-    return f"( trap '{trap_body}' EXIT; {raw_cmd} )"
+    extra = f" {extra_flags.strip()}" if extra_flags and extra_flags.strip() else ""
+    return f"( trap '{trap_body}' EXIT; {raw_cmd}{extra} )"
 
 
 def _build_claude_command(*, cwd: str, uid: str, name: str,
@@ -1162,19 +1337,92 @@ def _stale_started_a_ok_runs(conn: sqlite3.Connection, max_age_hours: float) -> 
     ).fetchall()
 
 
-def cmd_runs_sweep(args: argparse.Namespace) -> None:
-    """Mark long-stuck `started` a-ok: runs as `failed` (safety-net).
+def _orphan_stale_started_runs(conn: sqlite3.Connection, max_age_seconds: int) -> list[sqlite3.Row]:
+    """Return ``hermes_runs`` rows that are orphan candidates by age (seconds).
 
-    Belt-and-suspenders for the rare cases where the trap-based wrapper
-    is bypassed: SIGKILL on the bash subshell, OOM-killed claude binary,
-    machine power loss between trap-fire and the SQLite UPDATE.
+    Criteria:
+      * ``status = 'started'``
+      * ``started_at`` older than ``max_age_seconds`` ago
+
+    We can't check whether the dispatched bash process is still alive from
+    SQLite alone (heartbeat handles that surface). The age gate is the
+    sole signal: a run that hasn't reported in within the window is
+    presumed orphaned by trap-bypass or PM crash.
+    """
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(seconds=max_age_seconds)).isoformat(timespec="seconds")
+    return conn.execute(
+        "SELECT r.*, s.uuid AS session_uuid, s.name AS session_name "
+        "FROM hermes_runs r "
+        "JOIN hermes_sessions s ON s.id = r.session_id "
+        "WHERE r.status = 'started' AND r.started_at < ? "
+        "ORDER BY r.started_at ASC",
+        (cutoff,),
+    ).fetchall()
+
+
+def cmd_runs_sweep(args: argparse.Namespace) -> None:
+    """Mark long-stuck `started` runs closed (safety-net).
+
+    Two modes:
+
+    * Default (legacy) — sweep ``a-ok:`` runs older than ``--max-age-hours``,
+      mark them ``failed``. This is the belt-and-suspenders path for
+      SIGKILL / OOM / power-loss cases where the bash trap was bypassed
+      but the dispatcher row never got an end-call.
+    * ``--orphan-stale --max-age <seconds>`` — sweep ANY started run
+      whose ``started_at`` is older than ``max-age`` seconds, mark them
+      ``abandoned`` and append a ``orphan-sweep age>{n}s`` note. This is
+      the dispatcher-orphan path (PRD §4) — explicit user action, runs
+      regardless of the ``WORKER_CONTROL_STALE_BACKFILL_ENABLED`` gate
+      because the user is invoking it directly.
 
     Auto-promote in ``cmd_run_end`` only fires on ``--status done``,
-    so a swept (failed) run leaves its session in ``active`` — by
-    design. The user can then inspect and manually decide whether to
-    abandon the session or revive it.
+    so a swept run leaves its session in ``active`` — by design. The
+    user can then inspect and manually decide whether to abandon the
+    session or revive it.
     """
+    orphan_mode = bool(getattr(args, "orphan_stale", False))
     with _connect() as conn:
+        if orphan_mode:
+            max_age = int(args.max_age)
+            rows = _orphan_stale_started_runs(conn, max_age)
+            if not rows:
+                print(f"(no started runs older than {max_age}s)")
+                if args.json:
+                    print(json.dumps({
+                        "swept_count": 0,
+                        "candidates": [],
+                        "dry_run": bool(args.dry_run),
+                        "max_age_seconds": max_age,
+                        "mode": "orphan-stale",
+                    }, ensure_ascii=False))
+                return
+            now = _now()
+            note = f"orphan-sweep age>{max_age}s"
+            if args.dry_run:
+                print(f"DRY-RUN — would mark {len(rows)} run(s) as abandoned "
+                      f"(cutoff={max_age}s):")
+            else:
+                for r in rows:
+                    conn.execute(
+                        "UPDATE hermes_runs SET status='abandoned', ended_at=?, note=? WHERE id=?",
+                        (now, note, r["id"]),
+                    )
+                print(f"swept {len(rows)} run(s) → abandoned (cutoff={max_age}s):")
+            for r in rows:
+                print(f"  run #{r['id']:>5}  {r['started_at']}  "
+                      f"session={r['session_uuid'][:8]}  name={r['name']}")
+            if args.json:
+                print(json.dumps({
+                    "swept_count": 0 if args.dry_run else len(rows),
+                    "candidates": [dict(r) for r in rows],
+                    "dry_run": bool(args.dry_run),
+                    "max_age_seconds": max_age,
+                    "mode": "orphan-stale",
+                }, ensure_ascii=False))
+            return
+
         rows = _stale_started_a_ok_runs(conn, args.max_age_hours)
         if not rows:
             print(f"(no stale a-ok: started runs older than {args.max_age_hours}h)")
@@ -1305,6 +1553,13 @@ def main() -> None:
                                "self-close wrapper (legacy behavior; the PM "
                                "agent must then call `run end` manually). "
                                "Default: wrap so the run auto-closes on exit.")
+    ss_start.add_argument("--extra-flags", default="",
+                          help="extra `claude` flags spliced INSIDE the trap "
+                               "subshell (e.g. '--output-format json'). "
+                               "Prefer this over appending flags after the "
+                               "emitted command — those land outside the "
+                               "wrap and break the EXIT trap with a syntax "
+                               "error.")
     ss_start.add_argument("--json", action="store_true")
     ss_start.set_defaults(fn=cmd_session_start)
 
@@ -1408,6 +1663,17 @@ def main() -> None:
     runs_sweep.add_argument("--max-age-hours", type=float, default=24.0,
                             help="only sweep runs whose started_at is older "
                                  "than this many hours (default 24).")
+    runs_sweep.add_argument("--orphan-stale", action="store_true",
+                            help="orphan-stale mode (PRD §4): sweep ANY "
+                                 "started run older than --max-age seconds, "
+                                 "mark them 'abandoned' (not 'failed'). "
+                                 "Runs regardless of WORKER_CONTROL_STALE_"
+                                 "BACKFILL_ENABLED — this is an explicit "
+                                 "user action.")
+    runs_sweep.add_argument("--max-age", type=int, default=60,
+                            help="orphan-stale mode: cutoff in seconds "
+                                 "(default 60). Ignored unless "
+                                 "--orphan-stale is set.")
     runs_sweep.add_argument("--dry-run", action="store_true",
                             help="report what would be swept without writing.")
     runs_sweep.add_argument("--json", action="store_true")
