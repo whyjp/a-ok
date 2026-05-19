@@ -1633,7 +1633,7 @@ def main() -> None:
 
     rr_end = rr_sub.add_parser("end", help="mark a run finished")
     rr_end.add_argument("run_id", help="run id (from `runs list` or `run start` output)")
-    rr_end.add_argument("--status", choices=["done", "failed"], default="done")
+    rr_end.add_argument("--status", choices=["done", "failed", "abandoned"], default="done")
     rr_end.add_argument("--note", help="freeform outcome note")
     rr_end.set_defaults(fn=cmd_run_end)
 
