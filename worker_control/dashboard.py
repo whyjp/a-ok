@@ -205,6 +205,7 @@ def _session_view_to_dict(v: SessionView) -> dict[str, Any]:
         "dispatch_mode": v.dispatch_mode,
         "run_count": v.run_count,
         "print_run_count": v.print_run_count,
+        "turn_count": v.turn_count,
         "last_run_index": v.last_run_index,
         "last_run_name": v.last_run_name,
         "last_run_mode": v.last_run_mode,
