@@ -7,7 +7,9 @@ We monkeypatch the source directories so we don't touch the host's real
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import time
 from pathlib import Path
 
 from worker_control_hermes import legacy_parity_ingest as ingest_mod
@@ -148,3 +150,72 @@ def test_load_session_payload_matches_legacy_keys(tmp_path: Path, monkeypatch) -
               "recap_native", "pending_queue", "effective_status",
               "spawn_slug", "is_spawned"):
         assert k in s, f"missing payload key: {k}"
+
+
+def test_ingest_recomputes_stale_active_on_skip(tmp_path: Path, monkeypatch) -> None:
+    """Regression guard for the stale-active bug.
+
+    Setup: a claude jsonl whose mtime is 5 hours ago (outside the 2h active
+    window, inside the 24h inactive window). The first ``ingest_all`` parses
+    it and lands ``effective_status='inactive'`` correctly. We then poke the
+    DB to forge the pre-fix state — effective_status flipped to 'active'
+    while transcript_mtime stays stale — and call ``ingest_all`` again.
+
+    The watermark-skip path SHOULD still fire (mtime unchanged), but the
+    bulk recompute pass MUST correct the row to 'inactive' and report it
+    via ``stats["status_recomputed"]``. Before the fix the row stayed
+    'active' forever.
+    """
+    db = tmp_path / "wc.sqlite3"
+    conn = sqlite3.connect(db)
+
+    fake_claude = tmp_path / "claude_projects"
+    proj = fake_claude / "D--some-proj"
+    proj.mkdir(parents=True)
+    jl = proj / "feedface-dead-beef-cafe-0123456789ab.jsonl"
+    _fake_jsonl(jl)
+
+    # Roll the file's mtime back 5 hours. Both atime and mtime — atime to
+    # avoid spurious filesystem updates, mtime is the watermark.
+    five_hours_ago = time.time() - 5 * 3600
+    os.utime(jl, (five_hours_ago, five_hours_ago))
+
+    monkeypatch.setattr(ingest_mod, "CLAUDE_PROJECTS_DIR", fake_claude)
+    monkeypatch.setattr(ingest_mod, "HERMES_HOME_DIR", tmp_path / "no_hermes")
+
+    stats1 = ingest_all(conn)
+    assert stats1["claude_updated"] == 1
+    # First parse — _classify_status sees a 5h-old last activity → inactive.
+    row = conn.execute(
+        "SELECT effective_status FROM claude_session_parity WHERE session_uuid=?",
+        (jl.stem,),
+    ).fetchone()
+    assert row[0] == "inactive"
+
+    # Forge the pre-fix state: parity row stuck on 'active' even though
+    # the jsonl mtime is 5h old. (This is what the production DB looks
+    # like for the 48 stale-active rows the brief quotes.)
+    conn.execute(
+        "UPDATE claude_session_parity SET effective_status='active' "
+        "WHERE session_uuid=?",
+        (jl.stem,),
+    )
+    conn.commit()
+
+    # Second tick: mtime hasn't moved, so the per-file parse is skipped
+    # (the watermark-skip path), but the bulk recompute pass must still
+    # correct the stale flag.
+    stats2 = ingest_all(conn)
+    assert stats2["claude_updated"] == 0
+    assert stats2["skipped"] >= 1
+    assert stats2["status_recomputed"] >= 1
+
+    row = conn.execute(
+        "SELECT effective_status FROM claude_session_parity WHERE session_uuid=?",
+        (jl.stem,),
+    ).fetchone()
+    assert row[0] == "inactive"
+
+    # And the recompute is a no-op when nothing's stale — third tick.
+    stats3 = ingest_all(conn)
+    assert stats3["status_recomputed"] == 0
