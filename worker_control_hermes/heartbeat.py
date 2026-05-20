@@ -435,7 +435,9 @@ def classify_sessions(window_min: int) -> dict:
             # Surface to stderr but never fail the heartbeat over a psutil hiccup.
             print(f"[subprocs] scan failed: {e!r}", file=sys.stderr)
 
-    alive_cutoff   = NOW - _dt.timedelta(minutes=5)
+    # window_cutoff still feeds the per-subagent "active" counter below
+    # (subagents whose jsonl moved within the window). The bucket
+    # assignment itself uses ``session_view.heartbeat_bucket``.
     window_cutoff  = NOW - _dt.timedelta(minutes=window_min)
 
     alive, just_ended, idle = [], [], []
@@ -502,12 +504,18 @@ def classify_sessions(window_min: int) -> dict:
                 print(f"[subprocs] claude lookup failed for {s['uuid'][:8]}: {e!r}",
                       file=sys.stderr)
 
-        # If any workload subproc is alive OR claude reports 'busy', treat
-        # the session as having very recent activity even if its jsonl
-        # mtime hasn't moved.
-        if s["_subprocs_alive"] or s["_claude_status"] == "busy":
-            last = NOW  # forces ALIVE bucket below
-            s["_last"] = NOW
+        # PR (heartbeat ↔ DB status parity): the previous override here
+        # promoted a session to ALIVE whenever a workload subproc was alive
+        # or the claude registry reported `status='busy'`. That contradicted
+        # ``claude_session_parity.effective_status`` for sessions whose
+        # transcript had gone stale (e.g. a `[Request interrupted by user]`
+        # session with a stuck background `rtk.exe grep` orphan) — the
+        # dashboard would show 'inactive' while heartbeat shouted ALIVE.
+        # Bucket assignment now comes from ``session_view.heartbeat_bucket``
+        # below, keyed on the view-derived ``display_status``. Live subprocs
+        # and busy-claude are still rendered as per-row detail chips by
+        # ``_line`` / ``_section_text_for`` — we just don't let them override
+        # the parity layer's verdict.
         # Natural-language label for the Slack card. Prefer the worker-DB
         # brief (curated one-liner), fall back to the jsonl's first user
         # message. Empty string means "no caption available".
@@ -532,21 +540,25 @@ def classify_sessions(window_min: int) -> dict:
                 # still useful to flag as pending.
                 s["_pending"] = pending
 
-        if last is None:
-            continue
-        if last < window_cutoff:
-            continue   # outside window — skip
-
-        # Explicit "just ended" path for hermes-tracked sessions.
-        ended_at = _parse_iso(s.get("ended_at"))
-        if s.get("status") in ("done", "failed", "abandoned") and ended_at and ended_at >= window_cutoff:
-            just_ended.append(s)
-            continue
-
-        if last >= alive_cutoff:
+        # Bucket assignment via the shared ``session_view.heartbeat_bucket``
+        # classifier — single source of truth with the dashboard's
+        # ``display_status``. ``None`` means "don't surface this session in
+        # the Slack snapshot" (outside window or terminal beyond just-ended).
+        from worker_control.session_view import heartbeat_bucket as _bucket
+        bucket = _bucket(
+            display_status=s.get("display_status"),
+            last_activity=last,
+            ended_at=s.get("ended_at"),
+            now=NOW,
+            window_min=window_min,
+        )
+        if bucket == "alive":
             alive.append(s)
-        else:
+        elif bucket == "just_ended":
+            just_ended.append(s)
+        elif bucket == "idle":
             idle.append(s)
+        # bucket is None → drop
 
     # Sort each bucket by recency desc.
     for bucket in (alive, just_ended, idle):

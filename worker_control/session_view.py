@@ -332,6 +332,55 @@ def _compute_display_status(
     return "done"
 
 
+def heartbeat_bucket(
+    *,
+    display_status: str | None,
+    last_activity,
+    ended_at: str | None,
+    now=None,
+    window_min: int = 30,
+    alive_cutoff_sec: int = 5 * 60,
+) -> str | None:
+    """Shared classifier — which heartbeat bucket does a session belong to.
+
+    Returns ``"alive" | "just_ended" | "idle" | None``. ``None`` means
+    "don't surface in the Slack snapshot at all" (outside the window or
+    terminal beyond the just-ended grace).
+
+    The function is the single source of truth ``heartbeat.classify_sessions``
+    consults — it intentionally takes ``display_status`` (not raw
+    ``effective_status``) so the heartbeat sees the same cross-validated
+    bucket the dashboard shows. A session with stale jsonl + a live
+    workload subproc therefore cannot be promoted to ALIVE just because
+    the subproc scan found it — the parity layer has already decided
+    "inactive" and we honor it here.
+    """
+    if last_activity is None:
+        return None
+    import datetime as _dt
+    if now is None:
+        now = _dt.datetime.now(_dt.timezone.utc)
+    age_s = (now - last_activity).total_seconds()
+    if age_s > window_min * 60:
+        return None
+    ds = (display_status or "").lower()
+    if ds == "done":
+        # Surface "just ended" rows only — the ledger's ``ended_at`` is
+        # what determines "did this close within the window".
+        if ended_at:
+            e = _parse_iso_dt(ended_at)
+            if e is not None and (now - e).total_seconds() <= window_min * 60:
+                return "just_ended"
+        return None
+    # active / inactive / unknown all share the 5-min ALIVE sub-window.
+    # ``inactive`` rows almost never make it here (age > 2h by parity
+    # definition) but we keep the path explicit for the edge case where
+    # mtime is fresh but parity hasn't ingested yet.
+    if ds == "active" and age_s <= alive_cutoff_sec:
+        return "alive"
+    return "idle"
+
+
 def _classify(
     *,
     name: str,
