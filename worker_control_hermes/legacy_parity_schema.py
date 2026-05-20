@@ -34,6 +34,13 @@ rows. The ``claude_session_parity`` table is purely additive.
 Idempotent: re-running ``apply_legacy_parity_schema(conn)`` is safe.
 ALTER TABLE ADD COLUMN is guarded by PRAGMA table_info() so we don't error
 on re-apply. New tables use IF NOT EXISTS.
+
+Migration note: the GENERATED VIRTUAL ``mention_id`` column and its index
+are created in *two* steps — the column inline via CREATE TABLE for fresh
+DBs and via ALTER for pre-existing ones, but the index is always created
+after the ALTER fallback. Inlining ``CREATE INDEX ... ON tbl(mention_id)``
+in the executescript block would abort on pre-PR DBs that have the table
+but not the column, before the ALTER could add it.
 """
 from __future__ import annotations
 
@@ -129,8 +136,11 @@ CREATE TABLE IF NOT EXISTS claude_session_parity (
 );
 CREATE INDEX IF NOT EXISTS ix_claude_session_parity_mtime
     ON claude_session_parity(transcript_mtime DESC);
-CREATE INDEX IF NOT EXISTS ix_claude_session_parity_mention_id
-    ON claude_session_parity(mention_id);
+-- NOTE: the ix_claude_session_parity_mention_id index is created in
+-- ``apply_legacy_parity_schema`` *after* the forward-only ALTER fallback
+-- runs, not here. Pre-PR DBs (table created without the GENERATED column)
+-- would otherwise abort executescript on the missing column before the
+-- ALTER could add it.
 """
 
 
@@ -305,11 +315,13 @@ def apply_legacy_parity_schema(conn: sqlite3.Connection) -> dict[str, list[str]]
             "ALTER TABLE claude_session_parity ADD COLUMN mention_id TEXT "
             "GENERATED ALWAYS AS ('nat#' || substr(session_uuid, 1, 8)) VIRTUAL"
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS ix_claude_session_parity_mention_id "
-            "ON claude_session_parity(mention_id)"
-        )
         audit["columns_added"].append("mention_id")
+    # Index lives outside the column-add branch so fresh DBs (which got
+    # the column inline via the CREATE TABLE above) still get indexed.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_claude_session_parity_mention_id "
+        "ON claude_session_parity(mention_id)"
+    )
 
     conn.commit()
     return audit
