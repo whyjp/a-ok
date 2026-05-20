@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from .legacy_parity_parser import (
+    ACTIVE_WINDOW_SEC,
+    INACTIVE_WINDOW_SEC,
     parse_claude_jsonl,
     parse_hermes_session_json,
 )
@@ -226,5 +228,64 @@ def ingest_all(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, in
                 _commit_parsed(conn, parsed, target="hermes")
                 stats["hermes_updated"] += 1
 
+    # Re-derive effective_status from transcript_mtime on every tick. The
+    # per-file watermark above skips re-parsing when the jsonl hasn't moved,
+    # but ``effective_status`` is time-relative — a row that was 'active' at
+    # last parse is 'inactive' or 'done' a few hours later even with the
+    # same mtime. Without this pass the dashboard reports dead sessions as
+    # active for hours/days.
+    stats["status_recomputed"] = _refresh_effective_status(conn)
+
     conn.commit()
     return stats
+
+
+# ---------------------------------------------------------------------------
+# effective_status refresh — single SQL pass per parity table
+# ---------------------------------------------------------------------------
+
+# The CASE expression both UPDATE statements use. Kept as one string so the
+# WHERE clause and the SET clause can't drift out of sync — they must be
+# byte-identical for the "only touch rows whose status actually changed"
+# optimisation to fire correctly. Thresholds are pulled from the parser
+# module so this matches ``_classify_status`` exactly.
+_EFFECTIVE_STATUS_CASE = f"""
+CASE
+  WHEN ended_at IS NOT NULL THEN 'done'
+  WHEN transcript_mtime IS NULL THEN 'done'
+  WHEN (strftime('%s','now') - strftime('%s', transcript_mtime)) <  {ACTIVE_WINDOW_SEC}   THEN 'active'
+  WHEN (strftime('%s','now') - strftime('%s', transcript_mtime)) < {INACTIVE_WINDOW_SEC}  THEN 'inactive'
+  ELSE 'done'
+END
+""".strip()
+
+
+def _refresh_effective_status(conn: sqlite3.Connection) -> int:
+    """Bulk-recompute ``effective_status`` from ``transcript_mtime``.
+
+    Returns the total number of rows whose status actually changed across
+    both parity tables. The UPDATE filters on ``effective_status IS NOT``
+    the recomputed value so it's a no-op when nothing's stale — driven by
+    the existing ``ix_*_transcript_mtime`` indexes, this stays cheap.
+
+    Why this exists: the per-file watermark in ``ingest_all`` skips
+    re-parsing when ``transcript_mtime`` hasn't moved, which means
+    ``effective_status`` (a time-relative bucket) never gets recomputed for
+    rows whose underlying jsonl stopped being written. This pass closes
+    that gap on every heartbeat tick.
+    """
+    total = 0
+    for tbl in ("claude_session_parity", "hermes_agent_sessions"):
+        try:
+            cur = conn.execute(
+                f"""
+                UPDATE {tbl}
+                SET effective_status = {_EFFECTIVE_STATUS_CASE}
+                WHERE effective_status IS NOT ({_EFFECTIVE_STATUS_CASE})
+                """
+            )
+        except sqlite3.OperationalError:
+            # Table missing (very fresh DB / partial schema) — skip silently.
+            continue
+        total += cur.rowcount or 0
+    return total

@@ -37,13 +37,37 @@ def test_terminal_status_forces_done() -> None:
         ) == "done", f"status={st} should force done"
 
 
-def test_effective_status_active_overrides_recency() -> None:
-    # If the agent-parity layer says the session is currently active,
-    # we believe it even if last_used_at is stale (e.g. mtime hasn't
-    # been flushed yet).
+def test_effective_status_active_trusted_when_recency_agrees() -> None:
+    # Parity layer says 'active' AND last_used_at is fresh — believed.
+    assert _compute_display_status(
+        status="active", ended_at=None,
+        effective_status="active", last_used_at=_iso(10), now=_NOW,
+    ) == "active"
+
+
+def test_effective_status_active_downgraded_when_stale() -> None:
+    # Defense-in-depth: a stale 'active' parity flag (write-path watermark
+    # never re-ran the bucket recompute) gets cross-validated against
+    # last_used_at and downgraded to inactive/done. This guards the
+    # dashboard against a future regression in the ingest layer.
+    # 5h since last activity → inactive even though parity says active.
     assert _compute_display_status(
         status="active", ended_at=None,
         effective_status="active", last_used_at=_iso(60 * 5), now=_NOW,
+    ) == "inactive"
+    # 30h since last activity → done.
+    assert _compute_display_status(
+        status="active", ended_at=None,
+        effective_status="active", last_used_at=_iso(60 * 30), now=_NOW,
+    ) == "done"
+
+
+def test_effective_status_active_trusted_when_no_recency_signal() -> None:
+    # No last_used_at to cross-validate with — trust the parity flag rather
+    # than silently demote a session that may genuinely be active.
+    assert _compute_display_status(
+        status="active", ended_at=None,
+        effective_status="active", last_used_at=None, now=_NOW,
     ) == "active"
 
 

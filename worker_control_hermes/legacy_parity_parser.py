@@ -49,9 +49,16 @@ _RECAP_HINTS = (
     "[recap]",
 )
 
-# Buckets that gate effective_status.
-_ACTIVE_WINDOW_SEC   = 2 * 3600    # < 2h since last activity → active
-_INACTIVE_WINDOW_SEC = 24 * 3600   # < 24h → inactive, else done
+# Buckets that gate effective_status. Exported (un-underscored aliases)
+# so the ingest-layer SQL refresh in ``legacy_parity_ingest`` and the
+# dashboard read-path in ``worker_control.session_view`` derive from the
+# same source of truth — three thresholds, one definition.
+ACTIVE_WINDOW_SEC   = 2 * 3600    # < 2h since last activity → active
+INACTIVE_WINDOW_SEC = 24 * 3600   # < 24h → inactive, else done
+# Back-compat aliases — pre-existing internal callers use the underscored
+# names. Kept so this PR stays a single-MR add.
+_ACTIVE_WINDOW_SEC   = ACTIVE_WINDOW_SEC
+_INACTIVE_WINDOW_SEC = INACTIVE_WINDOW_SEC
 
 
 def _now() -> _dt.datetime:

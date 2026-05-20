@@ -285,7 +285,11 @@ def _compute_display_status(
     Precedence (highest first):
 
     1. ``ended_at`` set OR ledger ``status`` is terminal       → ``done``
-    2. agent-parity ``effective_status == 'active'``           → ``active``
+    2. agent-parity ``effective_status == 'active'`` AND
+       ``last_used_at`` ≤ 2h ago                               → ``active``
+       (cross-validated — a stale ``effective_status`` from a stuck
+       watermark gets downgraded by recency, defense-in-depth against the
+       write-path bug fixed in ``legacy_parity_ingest._refresh_effective_status``.)
     3. recency of ``last_used_at`` against fixed thresholds:
        ≤ 2h → ``active``;  ≤ 24h → ``inactive``;  > 24h → ``done``
 
@@ -296,16 +300,28 @@ def _compute_display_status(
         return "done"
     if (status or "").lower() in _TERMINAL_STATUSES:
         return "done"
-    if (effective_status or "").lower() == "active":
-        return "active"
 
     import datetime as _dt
     if now is None:
         now = _dt.datetime.now(_dt.timezone.utc)
     last = _parse_iso_dt(last_used_at)
+    age_s: float | None
     if last is None:
+        age_s = None
+    else:
+        age_s = (now - last).total_seconds()
+
+    if (effective_status or "").lower() == "active":
+        # Trust the parity flag only if recency agrees. When last_used_at
+        # is missing we still trust the flag (no signal to override with).
+        if age_s is None or age_s < 0 or age_s <= ACTIVE_WINDOW_SECONDS:
+            return "active"
+        if age_s <= INACTIVE_WINDOW_SECONDS:
+            return "inactive"
+        return "done"
+
+    if age_s is None:
         return "inactive"
-    age_s = (now - last).total_seconds()
     if age_s < 0:
         # Future timestamp — treat as just-touched.
         return "active"
