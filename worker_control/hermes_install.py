@@ -88,7 +88,11 @@ CREATE INDEX IF NOT EXISTS ix_hermes_sessions_project    ON hermes_sessions(proj
 CREATE INDEX IF NOT EXISTS ix_hermes_sessions_status     ON hermes_sessions(status);
 CREATE INDEX IF NOT EXISTS ix_hermes_sessions_origin     ON hermes_sessions(origin);
 CREATE INDEX IF NOT EXISTS ix_hermes_sessions_last_used  ON hermes_sessions(last_used_at DESC);
-CREATE INDEX IF NOT EXISTS ix_hermes_sessions_mention_id ON hermes_sessions(mention_id);
+-- NOTE: the ix_hermes_sessions_mention_id index is created in
+-- ``_apply_extra_schema`` *after* the forward-only ALTER fallback runs, not
+-- here. Older DBs predate the GENERATED ``mention_id`` column; if this
+-- script tried to index it inline, executescript would abort on the
+-- missing column before the ALTER had a chance to add it.
 
 CREATE TABLE IF NOT EXISTS hermes_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,10 +150,14 @@ def _apply_extra_schema(db_path: Path) -> None:
                 "CASE origin WHEN 'spawned' THEN 'aok#' ELSE 'nat#' END "
                 "|| substr(uuid, 1, 8)) VIRTUAL"
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS ix_hermes_sessions_mention_id "
-                "ON hermes_sessions(mention_id)"
-            )
+        # Index lives outside the column-add branch so fresh DBs (which
+        # got the column inline via the CREATE TABLE above) still get
+        # indexed. Without this, fresh DBs would have the column but no
+        # supporting index for mention_id lookups.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_hermes_sessions_mention_id "
+            "ON hermes_sessions(mention_id)"
+        )
         # The hermes_projects_v view + INSTEAD-OF triggers (backward-compat
         # for the legacy projects.db column shape). The SQL file is shipped
         # as package data inside worker_control_hermes/.
