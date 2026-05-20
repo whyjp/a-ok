@@ -120,10 +120,17 @@ CREATE TABLE IF NOT EXISTS claude_session_parity (
     spawn_slug        TEXT,
     spawn_reason      TEXT,
     is_spawned        INTEGER NOT NULL DEFAULT 0,
-    effective_status  TEXT
+    effective_status  TEXT,
+    -- Short copy/lookup id. Every parity row is a native (`.claude/projects/`)
+    -- transcript by definition, so the prefix is always 'nat#'.
+    mention_id        TEXT GENERATED ALWAYS AS (
+        'nat#' || substr(session_uuid, 1, 8)
+    ) VIRTUAL
 );
 CREATE INDEX IF NOT EXISTS ix_claude_session_parity_mtime
     ON claude_session_parity(transcript_mtime DESC);
+CREATE INDEX IF NOT EXISTS ix_claude_session_parity_mention_id
+    ON claude_session_parity(mention_id);
 """
 
 
@@ -284,6 +291,25 @@ def apply_legacy_parity_schema(conn: sqlite3.Connection) -> dict[str, list[str]]
         ).fetchall()
     }
     audit["tables_added"] = sorted(after - before)
+
+    # Forward-only migration: add the GENERATED VIRTUAL mention_id column to
+    # claude_session_parity rows that pre-date this PR. VIRTUAL columns can
+    # be added via ALTER TABLE without rebuilding the table.
+    # NOTE: ``PRAGMA table_info`` omits GENERATED columns; use ``table_xinfo``
+    # so the existence check correctly skips after the column is present.
+    parity_cols = {
+        r[1] for r in conn.execute("PRAGMA table_xinfo(claude_session_parity)")
+    }
+    if "mention_id" not in parity_cols:
+        conn.execute(
+            "ALTER TABLE claude_session_parity ADD COLUMN mention_id TEXT "
+            "GENERATED ALWAYS AS ('nat#' || substr(session_uuid, 1, 8)) VIRTUAL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_claude_session_parity_mention_id "
+            "ON claude_session_parity(mention_id)"
+        )
+        audit["columns_added"].append("mention_id")
 
     conn.commit()
     return audit

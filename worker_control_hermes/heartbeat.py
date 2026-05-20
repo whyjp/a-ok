@@ -590,26 +590,16 @@ def classify_sessions(window_min: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def _mention_id(s: dict) -> str:
-    """Return a copy/mention-friendly identifier for a session.
+    """Short copy/lookup id matching the DB's GENERATED VIRTUAL column.
 
-    spawned: the hermes-managed slug (already `a-ok:<slug>`), with a
-        derived `a-ok:<uuid-short>` fallback for legacy rows that
-        predate the slug naming convention.
-    native: `native:<claude_name>` if claude-code's own session name is
-        known, else `native:<name>` (user-set via `/name`), else
-        `native:<uuid-short>` so the user can always copy *something*
-        stable to refer to the session.
+    `aok#<uuid8>` for spawned sessions, `nat#<uuid8>` otherwise. Same
+    formula `hermes_sessions.mention_id` uses, so what Slack prints is
+    exactly what `WHERE mention_id = ?` will find in the DB.
     """
     uuid_short = (s.get("uuid") or "")[:8]
     if s.get("origin") == "spawned":
-        nm = (s.get("name") or "").strip()
-        if nm.startswith("a-ok:"):
-            return nm
-        return f"a-ok:{uuid_short}"
-    cn = (s.get("_claude_name") or "").strip()
-    nm = (s.get("name") or "").strip()
-    label = cn or nm or uuid_short
-    return label if label.startswith("native:") else f"native:{label}"
+        return f"aok#{uuid_short}"
+    return f"nat#{uuid_short}"
 
 
 def _line(s: dict) -> str:
@@ -617,16 +607,10 @@ def _line(s: dict) -> str:
     origin_tag = "spawned" if s["origin"] == "spawned" else "native"
     name = (s["name"] or "(unnamed)")[:36]
     proj = (s["proj_name"] or Path(s["proj_path"] or "").name or "(unknown)")[:24]
-    uuid_short = s["uuid"][:8]
     age = _fmt_age(s["_last"])
     mid = _mention_id(s)
 
-    if mid == (s.get("name") or "").strip():
-        # name == mention_id: no point repeating it — just keep the
-        # uuid-short tail so the line still carries a stable identifier.
-        title = f"[{origin_tag}] {proj} / {name}  ({uuid_short})"
-    else:
-        title = f"[{origin_tag}] {proj} / {name}  [{mid}]"
+    title = f"[{origin_tag}] {proj} / {name}  [{mid}]"
     cn = (s.get("_claude_name") or "").strip()
     if cn and cn != (s["name"] or ""):
         title += f"  (claude: {cn[:36]})"
@@ -767,18 +751,10 @@ def _section_text_for(s: dict, bucket: str) -> str:
     origin_tag = "spawned" if s["origin"] == "spawned" else "native"
     mid = _mention_id(s)
 
-    if mid == (s.get("name") or "").strip():
-        # mention_id and the hermes-assigned slug are identical — render
-        # one combined chip rather than `<mid>` `<name>` side by side.
-        head = (
-            f"*{_slack_esc(proj)}* / `{_slack_esc(name)}`"
-            f"  ·  {_slack_esc(age)}"
-        )
-    else:
-        head = (
-            f"`{_slack_esc(mid)}`  *{_slack_esc(proj)}* / `{_slack_esc(name)}`"
-            f"  ·  {_slack_esc(age)}"
-        )
+    head = (
+        f"`{_slack_esc(mid)}`  *{_slack_esc(proj)}* / `{_slack_esc(name)}`"
+        f"  ·  {_slack_esc(age)}"
+    )
     # Mutable claude-side label — shown ONLY when it diverges from the
     # hermes-managed slug, so the user can see "I /renamed this session in
     # claude to '3day_sampler'" without us ever clobbering the stable name.
